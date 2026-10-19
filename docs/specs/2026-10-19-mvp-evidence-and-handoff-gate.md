@@ -100,7 +100,7 @@ In the MVP:
 7. **Run recorder**: starts agent runs, records who ran them from the launcher side, and
    keeps local runs away from kwoon's state and secrets.
 8. **Post-merge tracking**: follows each merge of a handed-off pull request to a
-   finished acceptance result. A red target branch pauses new handoffs (see Q3).
+   finished acceptance result. A red target branch pauses new handoffs.
 9. **`kwoon doctor`**: the capability report. kwoon refuses to start when a floor
    guarantee cannot hold.
 
@@ -203,8 +203,8 @@ it when available.
 | G10 | A verdict carries over only when the system can vouch for the change. | Floor | Strictest form: never carried over. A new head needs a new review. | None needed. |
 | G11 | Only a non-LLM party merges, and the gate is re-evaluated at merge time. | Degradable | Degraded. kwoon does not merge in the MVP. Only kwoon hands off. It re-evaluates handed-off pull requests on every poll and turns one back into a draft when the gate fails. A merge between a change of facts and the next poll is caught afterwards by the audit and post-merge tracking. | A forge rule that blocks merging when the head changed after approval. |
 | G12 | A change at risk of conflicting with the target branch is tested on the merged result first. | Tunable | When files the pull request changed were also changed on the target branch since their merge base, the head must contain the target tip before handoff. Otherwise it is handed off without syncing, and post-merge tracking is the fallback. A circuit breaker switches to "always sync" when the target turns red too often. | A forge rule requiring branches to be up to date. |
-| G13 | The acceptance run after each merge always finishes. | Floor (see Q3) | kwoon follows each handed-off merge to a finished acceptance run. It re-runs a cancelled or missing run where the operator's account can. Elsewhere it raises a question (Q3). | None needed. |
-| G14 | A red target branch pauses further merges, opens a fix issue, and measures time to green. | Tunable | New handoffs pause. kwoon raises a question to the operator that lists the merges the red run covers, and records time to green. In a repository the operator does not own, kwoon opens nothing upstream (Q3). | None needed. |
+| G13 | The acceptance run after each merge always finishes. | Floor where the operator's account can re-run the target branch's CI; degradable elsewhere | kwoon follows each handed-off merge to a finished acceptance run, and re-runs a cancelled or missing run. Where the operator's account cannot re-run it, kwoon raises a question instead, and the capability report shows G13 as "tracked, not guaranteed" for that repository. | None needed. |
+| G14 | A red target branch pauses further merges, opens a fix issue, and measures time to green. | Tunable | New handoffs pause. Instead of opening a fix issue, kwoon raises a question to the operator that lists the merges the red run covers, and it records time to green. kwoon opens nothing in the governed repository. | None needed. |
 | G15 | Review loops end: a round limit, and findings with stable identities. | Tunable | Round limit and finding records; automatic duplicate detection later. | None needed. |
 | G16 | Sensitive paths always get a human: the policy layer as a floor, CI and credential paths as tunable. | Floor (policy layer), tunable (others) | A `kwoon approve` record for the exact head. Forge approvals do not count. | Code-owner review by a separate person. |
 | G17 | A policy change is authorized by the previously approved policy; runs read only approved policy. | Floor | kwoon reads only a policy commit the operator accepted on the host. Before accepting, it checks the new commit against the current policy's floors. | None needed. |
@@ -489,7 +489,9 @@ reports. A value the harness does not report is recorded as `unknown`.
 - It then waits for an acceptance check, as named in the policy, that ran on a
   target-branch commit containing the merge and finished.
 - A cancelled or missing run is re-run where the operator's account may re-run the
-  target branch's CI (a capability, checked per repository). Elsewhere, see Q3.
+  target branch's CI (a capability, checked per repository). Elsewhere kwoon raises a
+  question, and the capability report shows G13 as "tracked, not guaranteed" for that
+  repository.
 - Until a run finishes, the merge stays "not accepted".
 - A failed run triggers three things:
   - new handoffs to that repository pause (gate step 8);
@@ -596,6 +598,7 @@ after the first month:
 | Upstream CI, approvals, and comments are data. | They follow someone else's rules and are written through accounts kwoon cannot tell apart. |
 | Approvals only through `kwoon approve` on the host. | The only channel neither cloud sessions nor wrapped local runs can reach. |
 | kwoon runs no CI. | Running pull-request code on the operator's machine is the larger risk. The CI configuration is a policy-layer path, so a pull request cannot quietly change how checks run. |
+| G13 is a floor only where the operator's account can re-run the target branch's CI; elsewhere kwoon tracks every merge and asks the operator. G14 raises a question instead of opening an issue. | kwoon cannot re-run CI it has no rights to, and should not open issues in someone else's project. Keeping G13 a floor everywhere would stop kwoon from starting in those repositories. |
 | The kwoon host polls the forge; it opens no inbound port. | The host is a personal machine; no public endpoint to defend. While the host is down, nothing is handed off (fail closed). Already handed-off pull requests can still be merged; the audit checks them when the host is back. |
 | Event-store checkpoints go to a branch in the policy repository. | A second copy outside the host, in a repository the operator controls, on any forge or none. |
 | No verdict carry-over in the MVP. | The floor (G10) holds trivially. Cost: a required sync also means a new review. Carry-over needs its own equivalence rule and tests. |
@@ -629,17 +632,6 @@ strategy includes a queue that tests changes on the latest target before merging
 - **Q2. Is approving only at the kwoon host acceptable for the MVP?** Recommended: yes.
   It is the only channel agents cannot reach without new machinery. The cost is that the
   operator cannot approve from a phone until a later spec adds a second channel.
-- **Q3. What do G13 and G14 promise in a repository the operator does not run?** kwoon
-  can re-run CI only where the operator's account may. In someone else's project it
-  should not open issues upstream either. Recommended:
-  - G13 stays a floor wherever the operator's account can re-run the target branch's CI.
-  - Elsewhere, kwoon follows every handed-off merge to a finished run. When a run is
-    missing or cancelled and cannot be re-run, it raises a question. The capability
-    report shows G13 as "tracked, not guaranteed" for that repository.
-  - G14's fix issue becomes a question to the operator.
-
-  This lowers G13 from a floor to degradable outside the operator's own repositories, so
-  it needs the operator's decision.
 
 ## Still to verify (in the plan, before the matching task)
 

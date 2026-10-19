@@ -23,12 +23,15 @@ kwoon is a governance layer for AI coding agents; see [README.md](README.md).
 ## How work is organized
 
 - **Tracking issue**: the problem, the decisions, and links to its spec and plan.
-- **Spec** (`docs/specs/<id>/spec.md`): a decision record. It may be revised by pull
-  request until its tracking issue is first closed; after that it is frozen. A later
-  change gets a new spec whose header says `supersedes: <old path>`.
-- **Plan** (`docs/plans/<id>.md`): a work package, reviewed in a pull request and frozen
-  once merged. It stays in git while the work runs and is deleted when the tracking
-  issue closes.
+- **Spec** (`docs/specs/<YYYY-MM-DD>-<slug>.md`): a decision record. It may be revised
+  by pull request until its tracking issue is first closed; after that it is frozen. A
+  later change gets a new spec whose header says `supersedes: <old path>`.
+- **Plan** (`docs/plans/<YYYY-MM-DD>-<slug>.md`): a work package, reviewed in a pull
+  request and frozen once merged. It stays in git while the work runs and is deleted
+  when the tracking issue closes.
+- The date in a file name is the day the file was first drafted and never changes. The
+  slug says what the document is about in a few lowercase words joined by hyphens.
+  Evidence and research notes go in the tracking issue's comments, not in extra files.
 - **Task**: a sub-issue of the tracking issue, one per behavior that can be built and
   accepted on its own. It names its task id and the plan it comes from as
   `<plan path>@<commit sha>`. Work from the plan at that commit. If the plan on `main`

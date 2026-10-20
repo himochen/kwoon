@@ -406,7 +406,7 @@ floor guarantee.
 
 | Option | Values | Notes |
 |---|---|---|
-| Governed repositories | Repository, target branch, the reviewers to request at handoff, and whether to post the handoff comment | Per repository. |
+| Governed repositories | Repository, target branch, the reviewers to request at handoff, and whether to include checks and approvals in the handoff comment | Per repository. |
 | Review independence | `fresh-session`, `cross-model`, or `cross-family`, plus an ordered fallback chain | Missing capability and no fallback: refuse to start (G19). |
 | Review count | 1 or more | Counted as distinct review runs. |
 | Round limit | 1 or more | Past the limit, the gate fails and asks the operator. |
@@ -508,9 +508,12 @@ When the gate passes, kwoon hands off:
 
 1. It writes the `gate` record and an `action` intent.
 2. It marks the pull request ready for review and requests the reviewers the policy
-   lists. If the policy says so, it also posts one comment that summarizes the gate
-   record for the merger: checks; review runs with every observed model and family,
-   each fallback, and the model evidence that applied; and approvals.
+   lists. It posts one handoff comment showing, for every author and review run used by
+   the gate, the requested model, observed models and families, every reported fallback
+   or downgrade, and the model evidence that applied. Reports from `launch-record` mode
+   are labeled unverified and distinguished from identities used by the gate. If the
+   policy requests the full gate summary, the same comment also includes checks and
+   approvals.
 3. It writes the `handoff` record.
 
 After a handoff, kwoon re-runs the gate on every poll. When a step fails, kwoon turns the
@@ -776,6 +779,7 @@ Both kinds run in the **isolated verification context**:
 | G9 | Each of these is rejected: a review from the author's own session; a review whose model is unknown; a same-family review on a `cross-family` path. Two verdicts from one review run count once. | Deterministic |
 | G9, G20 | The log-protection check passes and every logged turn ran on the requested model: the run's model satisfies policy. With the check passed, one turn falls back to a model of the author's family: a review on a `cross-family` path is rejected, and the `run` record and the handoff summary show the fallback next to, not in place of, the requested model. The canary write succeeds, or the check cannot be run: the evidence is `launch-record` and the check result is `failed` or `not run`. In that mode, a log that matches the requested model leaves it standing; a requested model of `unknown` family stays `unknown` although the log names a listed model. Requested model A with an unprotected log reporting model B for one turn: the record keeps A as requested and B as unverified reported data, and that turn's identity is `unknown`, so the review does not count. A fallback event bound to one turn makes that turn `unknown`; an event that cannot be assigned to a turn makes the run's observed-model collection `unknown`. Replay gives the same results and preserves the distinction between reported data and identities. | Deterministic |
 | G9, G20 | Missing model evidence, in each evidence mode: an empty log, a malformed log, and an unreadable log each make the run's observed-model collection `unknown`; a turn with a missing or malformed model field makes that turn `unknown`. Each fails a model requirement, the gate fails, and a question is raised; missing evidence never passes through an empty-set comparison, and in `protected-log` mode it is never filled from the requested model. A valid multi-turn log whose first and last turns satisfy a requirement but whose middle turn does not fails it; one whose every turn satisfies it passes. | Deterministic |
+| G9 | Handoff disclosure: with the policy's full gate summary turned off, a passing handoff still posts the handoff comment, and it shows, for both the author run and the review run, the requested model, the observed models and families, every reported fallback or downgrade, and the model evidence that applied. The fixture pairs a `protected-log` review run with a `launch-record` author run; the author run's reports are labeled unverified and kept apart from the identities the gate used. | Deterministic |
 | G3, G9 | Protection check: a canary denied by the run's confinement, with a successful harness-side write control, gives `passed`. A successful canary write from a tool gives `failed`. An invalid session-log path, an unavailable probe, an unrelated write error, or a write-capable tool outside the checked protection never gives `passed`. | Deterministic |
 | G10 | A new commit is pushed after an approval. The gate fails until a new review of the new head; if the pull request was handed off, it goes back to draft. | Deterministic and live |
 | G11 | The merger merges at a head kwoon did not hand off; the audit flags it. | Live |

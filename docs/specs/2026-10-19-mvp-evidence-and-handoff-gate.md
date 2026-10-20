@@ -208,7 +208,7 @@ it when available.
 | G11 | Only a non-LLM party merges, and the gate is re-evaluated at merge time. | Degradable | Degraded. kwoon does not merge in the MVP. Only kwoon hands off. It re-evaluates handed-off pull requests on every poll and turns one back into a draft when the gate fails. A merge between a change of facts and the next poll is caught afterwards by the audit and post-merge tracking. | A forge rule that blocks merging when the head changed after approval. |
 | G12 | A change at risk of conflicting with the target branch is tested on the merged result first. | Tunable | When files the pull request changed were also changed on the target branch since their merge base, the head must contain the target tip before handoff. Otherwise it is handed off without syncing, and post-merge tracking is the fallback. A circuit breaker switches to "always sync" when the target turns red too often. | A forge rule requiring branches to be up to date. |
 | G13 | The acceptance run after each merge always finishes. | Floor where the operator's account can re-run the target branch's CI and, for a missing run, start the acceptance workflow manually; degradable elsewhere | kwoon follows each handed-off merge to a finished acceptance run. It re-runs a cancelled run, and starts a missing one with the forge's manual trigger. Where the operator's account cannot do one of these, kwoon raises a question instead, and the capability report shows G13 as "tracked, not guaranteed" for that repository, for cancelled runs or for missing runs. | None needed. |
-| G14 | A red target branch pauses further merges, raises a question to the operator to get it fixed, and measures time to green. | Tunable | New handoffs pause. kwoon raises a question to the operator that lists the merges the red run covers, and it records time to green. kwoon opens no issues in the governed repository. | None needed. |
+| G14 | A red target branch pauses new handoffs, raises a question to the operator to get it fixed, and measures time to green. | Tunable | New handoffs pause, except a pull request that an operator approval marks as the fix for the red target (gate step 8). Pull requests already handed off are not pulled back. kwoon raises a question to the operator that lists the merges the red run covers, and it records time to green. kwoon opens no issues in the governed repository. | None needed. |
 | G15 | Review loops end: a round limit, and findings with stable identities. | Tunable | Round limit and finding records; automatic duplicate detection later. | None needed. |
 | G16 | Policy-layer paths always get an operator approval (floor). Other sensitive paths get the check the policy marks them with: an operator approval, or a cross-family review (tunable). | Floor (policy layer), tunable (others) | For policy-layer paths and sensitive paths marked `operator`: a `kwoon approve` record for the exact head. For sensitive paths marked `cross-family`: the gate's review rule (step 5). Forge approvals do not count. Protects against runs kwoon starts, not other processes of the operator's own OS user (see "Trust model"). | Code-owner review by a separate person. |
 | G17 | A policy change is authorized by the previously approved policy; runs read only approved policy. | Floor | kwoon reads only a policy commit the operator accepted on the host. Before accepting, it checks the new commit against the current policy's floors. | None needed. |
@@ -341,7 +341,7 @@ floor guarantee.
 | Policy-layer paths | Paths | Always need an operator `approval`. The list always includes: the CI configuration (`.github/workflows/` on GitHub); when the policy repository is the governed repository, the policy file; and, in kwoon's own repository, kwoon's gate code. The list can only grow. |
 | Sensitive paths | Paths, each `operator` or `cross-family` | `cross-family` entries are shown in the capability report. |
 | Model families | Model id → family | Used to judge `cross-family`. An unlisted model is `unknown`. |
-| Sync circuit breaker | Red count and window | Pilot value: 2 red target runs in 14 days. Once on, it stays on until the operator turns it off with `kwoon answer`. |
+| Sync circuit breaker | Red count and window | Pilot value: 2 red target runs in 14 days. Once on, it stays on until the operator turns it off with `kwoon answer` (see "Post-merge tracking"). |
 
 **Rulings (G8).** A ruling is an operator decision about one case that changes how the
 gate judges it. Rulings include these case-specific authorizations: every `approval`,
@@ -568,6 +568,15 @@ report is recorded as `unknown`.
   - kwoon records the time until the target is green again.
 
   This red count feeds the circuit breaker (G12).
+- **Circuit breaker.** The breaker is kept per governed repository.
+  - When the red count reaches the policy's threshold within its window, the breaker
+    turns on. The activation is identified by the record that turned it on.
+  - kwoon then raises a question tied to that repository and that activation.
+  - An `answer` choosing "turn off" is a ruling. The breaker is off for that activation
+    once the answer is archived (see "Policy v1"). Turning it off does not change the
+    policy's thresholds.
+  - An answer to a stale activation is refused: one where the breaker is already off,
+    or where a new activation has begun.
 
 ## How kwoon takes over its own repository
 
@@ -617,7 +626,7 @@ There are two kinds of test:
 | G9 | Each of these is rejected: a review from the author's own session; a review whose model is unknown; a same-family review on a `cross-family` path. Two verdicts from one review run count once. | Deterministic |
 | G10 | A new commit is pushed after an approval. The gate fails until a new review of the new head; if the pull request was handed off, it goes back to draft. | Deterministic and live |
 | G11 | The merger merges at a head kwoon did not hand off; the audit flags it. | Live |
-| G12 | The pull request and the target branch both changed file F since their merge base, and the head does not contain the target tip: the gate fails. Without a shared file, it passes without a sync. | Deterministic |
+| G12 | The pull request and the target branch both changed file F since their merge base, and the head does not contain the target tip: the gate fails. Without a shared file, it passes without a sync. The breaker turns on and a "turn off" answer to its question is archived: the breaker is off. An answer to an activation that is already off, or that a new activation replaced, is refused. After a restart, the breaker state rebuilt from records is the same. | Deterministic |
 | G13 | The acceptance run of a handed-off merge is cancelled. kwoon re-runs it and keeps the merge "not accepted" meanwhile; without re-run rights, it raises a question. The acceptance run is missing: kwoon starts it with the manual trigger; where the workflow accepts no manual trigger, kwoon raises a question and the capability report shows G13 as "tracked, not guaranteed" for missing runs. | Live |
 | G14 | The target turns red: the next handoff is blocked and a question lists the candidate merges. A second red within the breaker window switches on "always sync". | Deterministic |
 | G15 | The round limit is exceeded: the gate fails and asks the operator. | Deterministic |

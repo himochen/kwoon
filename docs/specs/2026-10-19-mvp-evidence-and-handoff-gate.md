@@ -307,6 +307,27 @@ Rules:
   `skipped`, `cancelled`, and every other conclusion do not. Post-merge tracking, the sync
   circuit breaker, and replay read red and cancelled acceptance runs from these records
   (see "Post-merge tracking").
+- **Several runs on one commit: a known failure is never hidden.** One commit can carry
+  several independent runs of the same policy workflow, for example one started by a
+  push and one by a pull-request event, or a manual trigger next to an automatic run.
+  For one check id on one commit, kwoon combines every job-scoped `check` record for
+  that check id attached to that commit. Each workflow run's current result comes from
+  the attempt rule in gate step 4; a run with no recognized, non-cancelled attempt is
+  `cancelled` when all its attempts were cancelled, and `unknown` otherwise. The
+  combined result is:
+  - `failed` if any run's current result is a recognized conclusion other than
+    `success` and `cancelled`;
+  - otherwise `unknown` if any run is `unknown`;
+  - otherwise `passed` if at least one run's current result is `success`;
+  - otherwise no result. For a required check this is missing evidence, so `unknown`
+    (G20). For acceptance the commit stays `not finished`, and G13's recovery applies.
+
+  One run's success never hides another run's known failure, and the order in which
+  runs finished does not matter. A run that completes later is combined when its record
+  arrives, and can turn `passed` into `failed`. Required checks (gate step 4), target
+  health (gate step 8), and acceptance (see "Post-merge tracking") all use this combined
+  result. The `gate` or `acceptance` record names every `check` record combined, so
+  replay gives the same result.
 - **The store is append-only.** A correction is a new record that names the old one in
   `supersedes`.
 - **An answer acts only through new records.** What an `answer` causes is written as a
@@ -397,11 +418,12 @@ cannot read gives `unknown`, and `unknown` fails with its reason (G20).
    - If the two sets share a file, or the circuit breaker is on, the head must contain
      the target tip.
    - Otherwise no sync is needed.
-4. **Checks**: every required check has a `check` record with conclusion `success` on
-   this head. For the attempts of one job in one workflow run, the highest completed
-   attempt with a recognized, non-cancelled conclusion decides its current result.
-   Earlier attempts remain historical evidence. A cancelled attempt does not clear a
-   known failure.
+4. **Checks**: every required check's combined result on this head is `passed` (see
+   "Several runs on one commit" under "Evidence contract v1"). For the attempts of one
+   job in one workflow run, the highest completed attempt with a recognized,
+   non-cancelled conclusion decides its current result. Earlier attempts remain
+   historical evidence. A cancelled attempt does not clear a known failure, and one
+   run's success does not clear another run's known failure on the same head.
 5. **Reviews (G9, G10)**:
    - **Effective rule**: the strictest of the policy's independence rule and the rules
      of every sensitive path the diff touches.
@@ -422,11 +444,14 @@ cannot read gives `unknown`, and `unknown` fails with its reason (G20).
 7. **Human paths (G16)**: if the diff touches policy-layer paths, or sensitive paths
    marked `operator`, an operator `approval` covers this exact head.
 8. **Target health (G14)**: the target is not red. It is red when the newest
-   target-branch commit with a finished acceptance run failed, as read from the acceptance
-   `check` records (see "Post-merge tracking"). For the attempts of one job in one
-   workflow run, the highest completed attempt with a recognized, non-cancelled
-   conclusion decides its current result. Earlier attempts remain historical evidence. A
-   cancelled attempt does not clear a known failure. "Newest" is by commit
+   target-branch commit whose combined acceptance result is `passed` or `failed` has
+   `failed`, as read from the acceptance `check` records (see "Several runs on one
+   commit" under "Evidence contract v1", and "Post-merge tracking"). For the attempts of
+   one job in one workflow run, the highest completed attempt with a recognized,
+   non-cancelled conclusion decides its current result. Earlier attempts remain
+   historical evidence. A cancelled attempt does not clear a known failure, and on one
+   commit, one run's success does not clear another run's known failure, whichever
+   finished last. "Newest" is by commit
    order, not by when the run finished, so a late result for an older commit cannot
    hide a newer failure. An operator approval marking this pull request as the fix for
    the red target overrides this step.
@@ -582,10 +607,14 @@ report is recorded as `unknown`.
 - Until a run finishes, the merge stays "not accepted".
 - **Evidence.** Retain completed acceptance attempts as `check` records with their raw
   forge conclusions, including cancellations. Completion of CI execution is distinct
-  from a finished acceptance result. A job-scoped `success` finishes acceptance as
-  `passed`; another recognized terminal job conclusion, except `cancelled`, finishes it
-  as `failed` and is red. A cancellation leaves acceptance `not finished`, contributes no
-  red, and follows G13's recovery rule. Workflow-scoped evidence cannot finish
+  from a finished acceptance result. Acceptance on a commit uses the combined result of
+  every run of the acceptance workflow on that commit (see "Several runs on one commit"
+  under "Evidence contract v1"). A combined `passed` finishes acceptance as `passed`; a
+  combined `failed` finishes it as `failed` and is red. When a run that completes later
+  turns a commit's `passed` into `failed`, kwoon writes a new `acceptance` record with
+  outcome `failed` that supersedes the earlier one, and the target is red. A
+  cancellation leaves that run without a result, contributes no red, and follows G13's
+  recovery rule. Workflow-scoped evidence cannot finish
   acceptance: a cancelled workflow follows G13; another workflow conclusion without the
   configured job result is `unknown`. Missing, malformed, or unrecognized conclusions are
   also `unknown`, raise a question, and cannot satisfy acceptance, clear a known failure,
@@ -665,13 +694,13 @@ There are two kinds of test:
 | G11 | The merger merges at a head kwoon did not hand off; the audit flags it. | Live |
 | G12 | The pull request and the target branch both changed file F since their merge base, and the head does not contain the target tip: the gate fails. Without a shared file, it passes without a sync. The breaker turns on and a "turn off" answer to its question is archived: the breaker is off. An answer to an activation that is already off, or that a new activation replaced, is refused. After a restart, the breaker state rebuilt from records is the same. | Deterministic |
 | G13 | The acceptance run of a handed-off merge is cancelled. kwoon re-runs it and keeps the merge "not accepted" meanwhile; without re-run rights, it raises a question. The acceptance run is missing: kwoon starts it with the manual trigger; where the workflow accepts no manual trigger, kwoon raises a question and the capability report shows G13 as "tracked, not guaranteed" for missing runs. A workflow is cancelled before its job has a result: acceptance stays `not finished` and no red is counted. | Live |
-| G14 | The target turns red: the next handoff is blocked and a question lists the candidate merges. A second red within the breaker window switches on "always sync". Both failed runs and a cancelled one are kept as `check` records with their conclusions; rebuilt from records, target health, the red count, and the breaker state are the same. One run that fails across two attempts counts one red, and so does re-reading it; a second distinct run in the window counts two, and the breaker turns on. `neutral`, `skipped`, and `timed_out` are failed; pending is not finished; missing or unrecognized is `unknown`; and all of this holds the same after a replay. | Deterministic |
+| G14 | The target turns red: the next handoff is blocked and a question lists the candidate merges. A second red within the breaker window switches on "always sync". Both failed runs and a cancelled one are kept as `check` records with their conclusions; rebuilt from records, target health, the red count, and the breaker state are the same. One run that fails across two attempts counts one red, and so does re-reading it; a second distinct run in the window counts two, and the breaker turns on. `neutral`, `skipped`, and `timed_out` are failed; pending is not finished; missing or unrecognized is `unknown`; and all of this holds the same after a replay. Two runs of the acceptance workflow on one commit, one failed and one passed: the commit is failed and the target red, whichever run finished last; when the failing run finishes after a `passed` acceptance, a superseding `acceptance` record says `failed`. Replay gives the same result. | Deterministic |
 | G15 | The round limit is exceeded: the gate fails and asks the operator. | Deterministic |
 | G16 | A pull request changes a policy-layer path with agent approvals only: the gate fails. | Deterministic |
 | G17 | `kwoon policy accept` is given a commit that lowers a floor or removes a policy-layer path; it is refused. A merged policy change has no effect until accepted. | Deterministic |
 | G18 | A record without a policy reference is rejected by the schema. | Deterministic |
 | G19 | The only account of the required second family is removed, with no fallback written: `kwoon doctor` refuses to start. A capability lapses between evaluation and handoff: the handoff is refused. A capability a publishing action needs lapses before that action: that action makes no external write. | Deterministic |
-| G20 | A required check's result cannot be read: the gate reports `unknown`, fails, and raises a question. | Deterministic |
+| G20 | A required check's result cannot be read: the gate reports `unknown`, fails, and raises a question. Two runs of a required check's workflow on one head, from a push and a pull-request event: one failed and one passed, the gate fails at step 4 in either finishing order; one passed and one with an unrecognized conclusion, the gate reports `unknown`. Replay gives the same decisions. | Deterministic |
 | G21 | A question's pull request gets a new head: the question lapses, and an answer to it has no effect. A question past its deadline is raised again. | Deterministic |
 
 Publishing a run's work adds these cases:
@@ -733,6 +762,7 @@ after the first month:
 | The kwoon host polls the forge; it opens no inbound port. | The host is a personal machine; no public endpoint to defend. While the host is down, nothing is handed off (fail closed). Already handed-off pull requests can still be merged; the audit checks them when the host is back. |
 | Rulings take effect only after kwoon commits them to the policy repository's checkpoint branch on the host; the checkpoint push carries them off the host. | G8 is a floor: an operator decision that changes how the gate judges must be in git, reviewable, before it acts, not only in the host's store. A local commit keeps rulings off the network path. Cost: until the next checkpoint push succeeds, the only git copy of recent rulings is on the host, the same boundary G6 states. |
 | Event-store checkpoints go to a branch in the policy repository. | A second copy outside the host, in a repository the operator controls, on any forge or none. |
+| When several runs of one policy workflow land on one commit, any run's known failure decides the check, and an unreadable run makes it `unknown`. | Fail closed: one green run must not mask a red one, and the result must not depend on which run finished last. Cost: a policy job that ends `skipped` or `neutral` under one of its workflow's triggers blocks every commit that trigger runs on, so the policy must name a job that runs to `success` under each trigger. |
 | No verdict carry-over in the MVP. | The floor (G10) holds trivially. Cost: a required sync also means a new review. Carry-over needs its own equivalence rule and tests. |
 
 Left to the plan, after comparing how mature projects of the same kind chose: the

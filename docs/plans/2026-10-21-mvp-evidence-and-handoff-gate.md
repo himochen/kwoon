@@ -1517,9 +1517,12 @@ it.
         a log claiming another model can only downgrade it to `unknown`, and the `run`
         record says which evidence applied;
       - the session log is not writable: the per-turn models from the log are recorded;
-      - one turn is served by a different model, such as a safety fallback: the
-        fallback is recorded and shown in the handoff, and a policy naming the
-        requested model is not satisfied;
+      - one turn is served by a different model, such as a safety fallback: T7 records
+        the per-turn models and fallback without folding the fallback into the
+        requested value. T10 verifies that a policy naming the requested model is not
+        satisfied. T15 verifies that the fallback is shown in the handoff, using a
+        separate fixture whose policy permits every observed model so that handoff can
+        occur;
       - the launch-time check cannot be run: the log is treated as writable.
   - Live, run by the operator: one review run per supported harness on the test
     repository.
@@ -1630,6 +1633,8 @@ it.
     decision per step, the exit code, and that `kwoon replay` reproduces the record byte
     for byte with the fake forge stopped.
   - The gate half of T7's log-rewrite test: that review is not counted.
+  - The gate half of T7's fallback test: a run with one turn served by a fallback model
+    does not satisfy a policy naming the requested model.
   - The rebuild test deletes `derived.db` between two passes and compares every
     decision.
 - **Depends on:** M1, T6, T7, T8, T9.
@@ -1811,6 +1816,8 @@ it.
     - a capped history where every page loads;
     - a crash after a per-reviewer intent but before submission.
   - Live: the same on the test repository, through the live kill seam.
+  - The handoff half of T7's fallback test: with a separate fixture whose policy permits
+    every observed model, the handoff happens and shows the fallback.
 - **Depends on:** M1, T10, T13, T14.
 
 #### T16. Handoff audit — blocked by OQ3

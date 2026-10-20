@@ -258,7 +258,7 @@ Kinds:
 | `push` | One push to a pull request branch, made by kwoon or observed on the forge. | repository; branch; old head (expected by kwoon, or seen on the forge; `absent` for a new branch); new head; publisher (`kwoon`, or `unknown` for an observed push); author run (the run whose clone kwoon published from, or `unknown`); pull request, or `none` when the push came first. A later `action` record links such a push to its pull request; the `push` record is never edited. |
 | `verdict` | A review result. | review run; repository; pull request; head and base commits; result (`approve`, `request_changes`, `unknown`); finding ids |
 | `finding` | One reported problem. | stable id; pull request; category; severity; status (`open`, `fixed`, `persists`, `dismissed` with a reason); first and last run that saw it |
-| `check` | One finished CI job read from the forge, whatever its conclusion. | check id from the policy; repository; workflow file and its revision; run id, job id, and attempt; triggering event; commit the result is attached to; commit actually tested, when the forge reports it; conclusion as the forge reports it (for example `success`, `failure`, `cancelled`) |
+| `check` | One completed CI job attempt, or workflow-lifecycle evidence for an acceptance workflow whose configured job has no result. | check id from the policy; scope (`job` or `workflow`); repository; workflow file and its revision; run id, job id (`none` for workflow-scoped evidence), and attempt; triggering event; commit the result is attached to; commit actually tested, when the forge reports it; conclusion as the forge reports it (for example `success`, `failure`, `cancelled`); forge completion time for a job-scoped result |
 | `approval` | An operator approval. | repository; pull request; head; what it covers (policy-layer paths, sensitive paths, authorship of unlinked commits, adopting an unaccounted change, a fix for a red target); entered through `kwoon approve`, or written from an `answer` that adopts an unaccounted change, which it names in `authorized_by` |
 | `gate` | One gate evaluation. | repository id; pull request; target branch; head; target tip evaluated; merge base; evaluator version; input record ids; decision (`pass`, `fail`, `unknown`) and the reason for each step |
 | `handoff` | A handoff, or turning a pull request back into a draft. | repository; pull request; head; the `gate` record it relied on; direction (`ready`, `back-to-draft`) and why |
@@ -269,7 +269,7 @@ Kinds:
 | `question` | A question to the operator. | subject; the facts it depends on (repository, pull request, head, policy commit); deadline; the choices it offers. The record is never edited: its answer is a later `answer` record, and its lapse is derived from later records that change a fact it depends on (G21). |
 | `archive` | A ruling committed to the policy repository's checkpoint branch in the host's clone. | the `approval` or `answer` record it archives; branch; commit id; result of the verification |
 | `answer` | An operator answer to one question, entered through `kwoon answer`. | the `question` it answers; the facts as kwoon showed them with the question; the choice made, from the question's choices (for example: dismiss a finding, with a reason; adopt or revert an unaccounted change; turn off the sync circuit breaker); whether it is a ruling (see "Policy v1") |
-| `action` | An external action kwoon takes. | intent id; operation; target; state (`intended`, `done`, `failed`, `unknown`); external id. For a push: destination repository and branch, the remote head expected there or `absent`, and the run's start and final heads. For opening a pull request: the head repository and branch, the base repository and branch, and the `push` records it links. For requesting reviewers: the reviewers to request. For re-running an acceptance run: the target commit, the check id, the merges covered, and the run id being re-run with its attempt number. For starting an acceptance run: the workflow, the target branch, the merges covered, and the runs of that workflow already seen on the branch. |
+| `action` | An external action kwoon takes. | intent id; operation; target; state (`intended`, `done`, `failed`, `unknown`); external id. For a push: destination repository and branch, the remote head expected there or `absent`, and the run's start and final heads. For opening a pull request: the head repository and branch, the base repository and branch, and the `push` records it links. For requesting reviewers: the handoff's complete reviewer set; each per-reviewer intent's repository, pull request, reviewer, authenticated forge account, and pre-request event ids; and the matching request-event id when completion is confirmed. For re-running an acceptance run: the target commit, the check id, the merges covered, and the run id being re-run with its attempt number. For starting an acceptance run: the workflow, the target branch, the merges covered, and the runs of that workflow already seen on the branch, from a complete read. |
 
 Rules:
 
@@ -292,15 +292,18 @@ Rules:
   commit), it records the old and new heads it saw on the forge, with author `unknown`.
   Such a push makes authorship `unknown` until the operator covers it with an
   `approval`.
-- **A CI result counts only with its provenance.** A `check` record is written only when
-  a finished job comes from the workflow file and job that the policy names for that
-  check id, and is attached to the exact commit it is read for: the pull request head for
-  a required check, or a target-branch commit for an acceptance check. A job with the
-  right name from another workflow, and a plain commit status, are never recorded and do
-  not count.
+- **A CI result counts only with its provenance.** A job-scoped `check` record is
+  written only when a completed job attempt comes from the workflow file and job that the
+  policy names for that check id, and is attached to the exact commit it is read for: the
+  pull request head for a required check, or a target-branch commit for an acceptance
+  check. A job with the right name from another workflow, and a plain commit status, are
+  never recorded and do not count. If an acceptance workflow completes without a result
+  for its configured job, retain its workflow identity, revision, run id, attempt, target
+  commit, and raw conclusion in a workflow-scoped `check`. This is lifecycle evidence
+  only; it cannot substitute for the configured job's result.
 - **Every conclusion is kept; only `success` passes.** A `check` record keeps the
-  conclusion the forge reports, so failed and cancelled runs stay in the store next to
-  passing ones, each attempt in its own record. Only `success` counts as a pass; `neutral`,
+  conclusion the forge reports, so failed and cancelled attempts stay in the store next
+  to passing ones, each attempt in its own record. Only `success` counts as a pass; `neutral`,
   `skipped`, `cancelled`, and every other conclusion do not. Post-merge tracking, the sync
   circuit breaker, and replay read red and cancelled acceptance runs from these records
   (see "Post-merge tracking").
@@ -395,7 +398,10 @@ cannot read gives `unknown`, and `unknown` fails with its reason (G20).
      the target tip.
    - Otherwise no sync is needed.
 4. **Checks**: every required check has a `check` record with conclusion `success` on
-   this head.
+   this head. For the attempts of one job in one workflow run, the highest completed
+   attempt with a recognized, non-cancelled conclusion decides its current result.
+   Earlier attempts remain historical evidence. A cancelled attempt does not clear a
+   known failure.
 5. **Reviews (G9, G10)**:
    - **Effective rule**: the strictest of the policy's independence rule and the rules
      of every sensitive path the diff touches.
@@ -417,7 +423,10 @@ cannot read gives `unknown`, and `unknown` fails with its reason (G20).
    marked `operator`, an operator `approval` covers this exact head.
 8. **Target health (G14)**: the target is not red. It is red when the newest
    target-branch commit with a finished acceptance run failed, as read from the acceptance
-   `check` records (see "Post-merge tracking"). "Newest" is by commit
+   `check` records (see "Post-merge tracking"). For the attempts of one job in one
+   workflow run, the highest completed attempt with a recognized, non-cancelled
+   conclusion decides its current result. Earlier attempts remain historical evidence. A
+   cancelled attempt does not clear a known failure. "Newest" is by commit
    order, not by when the run finished, so a late result for an older commit cannot
    hide a newer failure. An operator approval marking this pull request as the fix for
    the red target overrides this step.
@@ -495,11 +504,11 @@ it neither repeats nor loses it (G7):
 | Push the run's commits | Read the destination branch's head. If it is the run's final head, the push is done. If it is still the expected head recorded in the intent (or still absent, when the intent says `absent`), push again on the same condition. Anything else is not overwritten: it is recorded `unknown` and raises a question. A push the forge refuses is recorded `failed` and raises a question; kwoon does not retry it. |
 | Open the draft pull request | The description carries the intent id in a hidden marker. Search pull requests in every state in the recorded governed repository for the intent marker and the exact head repository and branch and base repository and branch recorded in the intent. Do not require the current head commit to equal the run's final head. A marker match with different endpoint identities is conflicting evidence: record `unknown`, raise a question, and open no replacement. One match means the pull request was already opened, even when it is closed or merged: kwoon does not open another. No match: open it. Several matches, conflicting evidence, or a search kwoon cannot read is `unknown` and raises a question. |
 | Mark ready, turn back into a draft | Read the pull request's state. The target state is idempotent: setting it again changes nothing. |
-| Request reviewers | Before the request, the intent records the reviewers to request. A reviewer leaves the forge's list of requested reviewers once they submit a review, so that list alone cannot tell a reviewer who already reviewed from one who was never requested. After a crash, kwoon reads the pull request's review-request history. A reviewer whom kwoon's forge account requested after the intent was recorded is done, whether they are still requested, already reviewed, or the request was later removed. kwoon requests only the reviewers with no such request. A history kwoon cannot read is `unknown` and raises a question; kwoon then requests nobody. |
+| Request reviewers | Record the complete reviewer set for the handoff. Before submitting each review request, write a separate `action` intent identifying the handoff, repository, pull request, reviewer, authenticated forge account, and request-event ids already present in a complete history read. After a crash, a reviewer with no per-reviewer intent has not been submitted by kwoon and may be requested. For an existing intent, an unambiguously new matching request event confirms completion; record its event id, even if the reviewer has since reviewed or the request was removed. Do not establish event ordering solely by comparing forge timestamps with the host's clock. An absent or ambiguous match, or unreadable or incomplete history, makes that intent `unknown`: raise a question and do not repeat its request automatically. |
 | Post the handoff comment | The comment carries the intent id in a hidden marker. Search the pull request's comments for it before posting again. |
 | Push a checkpoint | Read the checkpoint branch; a checkpoint already there is not pushed again. |
 | Re-run a cancelled acceptance run (G13) | Before the request, the intent records the target commit, the acceptance check id, the merges covered, and the exact run id being re-run with its current attempt number. Read that run. If its attempt number went up, the re-run was accepted: kwoon records it. If the attempt is unchanged, or the run cannot be read, kwoon records `unknown` and raises a question; it never repeats the request on its own. A request the forge refuses is recorded `failed` and raises a question. Another run, on a commit that contains the covered merges, may still satisfy acceptance (see "Post-merge tracking"), but it is recorded as its own `check` evidence, never as proof that this request was accepted. |
-| Start a missing acceptance run (G13) | Only where the policy's acceptance workflow accepts a manual trigger and the operator's account may use it (a capability, checked per repository). kwoon uses the forge's manual trigger on the target branch. Before the request, the intent records the workflow, the branch, the merges covered, and the runs of that workflow already seen on the branch. After a crash, exactly one new manually triggered run of that workflow, started by kwoon's forge account and created after the intent, means the start was done. Anything else, including a read that fails, is `unknown` and raises a question. The run counts toward acceptance only if its commit contains the covered merges. |
+| Start a missing acceptance run (G13) | Only where the policy's acceptance workflow accepts a manual trigger and the operator's account may use it (a capability, checked per repository). kwoon uses the forge's manual trigger on the target branch. Before the request, the intent records the workflow, the branch, the merges covered, and the runs of that workflow already seen on the branch. That read must be complete (all pages); an incomplete read makes the intent `unknown`. After a crash, exactly one manually triggered run of that workflow, started by kwoon's forge account, whose run id is not in the intent's complete read, means the start was done. Do not establish ordering by comparing forge timestamps with the host's clock. Anything else, including a read that fails, is `unknown` and raises a question. The run counts toward acceptance only if its commit contains the covered merges. |
 
 These are all the external writes kwoon makes in the MVP; it makes no other. An operation
 whose outcome kwoon cannot read is recorded as `unknown`. kwoon then raises a question
@@ -571,19 +580,31 @@ report is recorded as `unknown`.
   kwoon raises a question instead, and the capability report shows G13 as "tracked, not
   guaranteed" for cancelled or for missing runs in that repository.
 - Until a run finishes, the merge stays "not accepted".
-- **Evidence.** Every acceptance run kwoon reads is kept as a `check` record with its
-  conclusion: passed, failed, and cancelled alike. A run is finished when its conclusion
-  is anything but `cancelled`; it passed with `success` and failed with any other
-  conclusion. Target health (gate step 8), the `acceptance` record, and the circuit
-  breaker's red count are derived from these records only, so a replay sees the same red
-  and cancelled runs.
+- **Evidence.** Retain completed acceptance attempts as `check` records with their raw
+  forge conclusions, including cancellations. Completion of CI execution is distinct
+  from a finished acceptance result. A job-scoped `success` finishes acceptance as
+  `passed`; another recognized terminal job conclusion, except `cancelled`, finishes it
+  as `failed` and is red. A cancellation leaves acceptance `not finished`, contributes no
+  red, and follows G13's recovery rule. Workflow-scoped evidence cannot finish
+  acceptance: a cancelled workflow follows G13; another workflow conclusion without the
+  configured job result is `unknown`. Missing, malformed, or unrecognized conclusions are
+  also `unknown`, raise a question, and cannot satisfy acceptance, clear a known failure,
+  or contribute a red. Post-merge tracking and replay use these records; target health
+  and the breaker use their classified job results.
 - A failed run triggers three things:
   - new handoffs to that repository pause (gate step 8);
   - kwoon raises a question that lists the merges since the last passing run, the
     candidates for having caused the failure;
   - kwoon records the time until the target is green again.
 
-  This red count feeds the circuit breaker (G12).
+  The circuit breaker's red count is the number of distinct
+  `(repository, workflow run id)` pairs with at least one failed policy acceptance job.
+  Each pair counts once, using the earliest such failed attempt's forge completion time
+  for the policy window.
+  Re-reading a result, failing another job in the same run, or failing a later attempt
+  does not add another red or move that time. A later successful attempt does not erase
+  the historical failure. Missing or invalid identity or completion time makes the count
+  `unknown` under G20; it is not treated as zero.
 - **Circuit breaker.** The breaker is kept per governed repository.
   - When the red count reaches the policy's threshold within its window, the breaker
     turns on. The activation is identified by the record that turned it on.
@@ -637,14 +658,14 @@ There are two kinds of test:
 | G4 | From inside the wrapper, writing to the store fails; the capability report shows G4 as degraded. | Deterministic |
 | G5 | Derived state is deleted and rebuilt from records; every gate decision is the same. A pull request is marked ready from the operator's account without a handoff; it goes back to draft and a question is raised. | Deterministic and live |
 | G6 | One old record is edited and the chain recomputed; comparison with the last pushed checkpoint finds it. | Deterministic |
-| G7 | For each operation in "External actions", kwoon is killed after the forge or git remote accepts the request but before kwoon records it: marking a pull request ready, turning it back into a draft, requesting reviewers, posting the handoff comment, pushing a run's commits, opening a draft pull request, pushing a checkpoint, re-running a cancelled acceptance run, and starting a missing one. After restart, it records each action once, and repeats none: no second comment, no second push, no second pull request, no second checkpoint, no second re-run, and no second start. Two more re-run cases: after the crash the run cannot be read, so kwoon records `unknown`, raises a question, and re-runs nothing; and someone else started another run on a commit that contains the covered merges while the re-run's attempt is unchanged, so kwoon records that run as its own `check` evidence, records the re-run `unknown`, and raises a question. Two more reviewer-request cases: a requested reviewer submits a review before the restart, so they left the requested list, and kwoon does not request them again while still requesting any reviewer it never requested; and the review-request history cannot be read, so kwoon records `unknown`, raises a question, and requests nobody. | Deterministic and live |
+| G7 | For each operation in "External actions", kwoon is killed after the forge or git remote accepts the request but before kwoon records it: marking a pull request ready, turning it back into a draft, requesting reviewers, posting the handoff comment, pushing a run's commits, opening a draft pull request, pushing a checkpoint, re-running a cancelled acceptance run, and starting a missing one. After restart, it records each action once, and repeats none: no second comment, no second push, no second pull request, no second checkpoint, no second re-run, and no second start. Two more re-run cases: after the crash the run cannot be read, so kwoon records `unknown`, raises a question, and re-runs nothing; and someone else started another run on a commit that contains the covered merges while the re-run's attempt is unchanged, so kwoon records that run as its own `check` evidence, records the re-run `unknown`, and raises a question. Two more reviewer-request cases: a requested reviewer submits a review before the restart, so they left the requested list, and kwoon does not request them again while still requesting any reviewer it never requested; and the review-request history cannot be read, so kwoon records `unknown`, raises a question, and requests nobody. Reviewer-request recovery also covers a removed request, unequal host and forge clocks, incomplete pagination, and an attempted request without a conclusive history match. No attempted request repeats automatically; unresolved intents become `unknown` and raise a question. A reviewer with no per-reviewer intent is requested once. | Deterministic and live |
 | G8 | A policy that exists only in the store and not in git: `kwoon doctor` refuses to start. An `answer` dismisses a blocking finding and an `approval` covers a policy-layer path. When the local archive commit fails, the gate still fails on both. When the remote cannot be reached but the local archive succeeds, the gate passes, and the next checkpoint push carries both rulings. kwoon is killed after the archive commit but before the `archive` record: after restart, it records the existing commit and commits nothing twice. | Deterministic |
 | G9 | Each of these is rejected: a review from the author's own session; a review whose model is unknown; a same-family review on a `cross-family` path. Two verdicts from one review run count once. | Deterministic |
 | G10 | A new commit is pushed after an approval. The gate fails until a new review of the new head; if the pull request was handed off, it goes back to draft. | Deterministic and live |
 | G11 | The merger merges at a head kwoon did not hand off; the audit flags it. | Live |
 | G12 | The pull request and the target branch both changed file F since their merge base, and the head does not contain the target tip: the gate fails. Without a shared file, it passes without a sync. The breaker turns on and a "turn off" answer to its question is archived: the breaker is off. An answer to an activation that is already off, or that a new activation replaced, is refused. After a restart, the breaker state rebuilt from records is the same. | Deterministic |
-| G13 | The acceptance run of a handed-off merge is cancelled. kwoon re-runs it and keeps the merge "not accepted" meanwhile; without re-run rights, it raises a question. The acceptance run is missing: kwoon starts it with the manual trigger; where the workflow accepts no manual trigger, kwoon raises a question and the capability report shows G13 as "tracked, not guaranteed" for missing runs. | Live |
-| G14 | The target turns red: the next handoff is blocked and a question lists the candidate merges. A second red within the breaker window switches on "always sync". Both failed runs and a cancelled one are kept as `check` records with their conclusions; rebuilt from records, target health, the red count, and the breaker state are the same. | Deterministic |
+| G13 | The acceptance run of a handed-off merge is cancelled. kwoon re-runs it and keeps the merge "not accepted" meanwhile; without re-run rights, it raises a question. The acceptance run is missing: kwoon starts it with the manual trigger; where the workflow accepts no manual trigger, kwoon raises a question and the capability report shows G13 as "tracked, not guaranteed" for missing runs. A workflow is cancelled before its job has a result: acceptance stays `not finished` and no red is counted. | Live |
+| G14 | The target turns red: the next handoff is blocked and a question lists the candidate merges. A second red within the breaker window switches on "always sync". Both failed runs and a cancelled one are kept as `check` records with their conclusions; rebuilt from records, target health, the red count, and the breaker state are the same. One run that fails across two attempts counts one red, and so does re-reading it; a second distinct run in the window counts two, and the breaker turns on. `neutral`, `skipped`, and `timed_out` are failed; pending is not finished; missing or unrecognized is `unknown`; and all of this holds the same after a replay. | Deterministic |
 | G15 | The round limit is exceeded: the gate fails and asks the operator. | Deterministic |
 | G16 | A pull request changes a policy-layer path with agent approvals only: the gate fails. | Deterministic |
 | G17 | `kwoon policy accept` is given a commit that lowers a floor or removes a policy-layer path; it is refused. A merged policy change has no effect until accepted. | Deterministic |
@@ -751,9 +772,11 @@ None. Q1 (how G6 is stated) and Q2 (approving only at the host) were settled on
 - Whether the forge reports, for a manually triggered run, the triggering account, the
   trigger type, and the creation time, which the recovery rule for starting a missing
   acceptance run relies on.
-- Whether the forge reports each review request, and each removal, with the requesting
-  account, the requested reviewer, and the time, which the recovery rule for requesting
-  reviewers relies on.
+- GitHub documents review-request and removal events with event identity, requester,
+  reviewer, and occurrence time. Before implementing reviewer-request recovery, verify
+  with the configured credential that history can be read completely and that accepted
+  requests remain identifiable after a review or removal. Exercise pagination, timestamp
+  ambiguity, and unavailable history in the recovery tests.
 - Which commit a pull-request workflow actually tests (the head, or a test merge with
   the base at that moment), and whether the forge reports it.
 - That the local-run wrapper starts with each supported harness, and that the harness

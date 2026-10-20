@@ -376,7 +376,7 @@ floor guarantee.
 | Policy-layer paths | Paths | Always need an operator `approval`. The list always includes: the CI configuration (`.github/workflows/` on GitHub); when the policy repository is the governed repository, the policy file; and, in kwoon's own repository, kwoon's gate code. The list can only grow. |
 | Sensitive paths | Paths, each `operator` or `cross-family` | `cross-family` entries are shown in the capability report. |
 | Model families | Model id → family | Used to judge `cross-family`. An unlisted model is `unknown`. |
-| Sync circuit breaker | Red count and window | Pilot value: 2 red target runs in 14 days. Once on, it stays on until the operator turns it off with `kwoon answer` (see "Post-merge tracking"). |
+| Sync circuit breaker | Red count and window | Pilot value: 2 failed target commits in 14 days. Once on, it stays on until the operator turns it off with `kwoon answer` (see "Post-merge tracking"). |
 
 **Rulings (G8).** A ruling is an operator decision about one case that changes how the
 gate judges it. Rulings include these case-specific authorizations: every `approval`,
@@ -476,9 +476,11 @@ exception: a red target pauses new handoffs, but it does not pull back pull requ
 already handed off. The red target was not caused by them.
 
 **The gate that judges a change is never the code in that change.** It runs from a
-released version installed on the kwoon host. A pull request that changes kwoon's own
-gate is judged by the released gate, and the gate code is a policy-layer path in kwoon's
-repository, so the operator must also approve it.
+released version installed on the kwoon host. Every normal governed repository requires
+a released binary in both shadow and live modes. Development execution is confined to
+the isolated verification context (see "Acceptance of this spec's implementation"). A
+pull request that changes kwoon's own gate is judged by the released gate, and the gate
+code is a policy-layer path in kwoon's repository, so the operator must also approve it.
 
 ## Handoff audit
 
@@ -632,11 +634,12 @@ report is recorded as `unknown`.
   - kwoon records the time until the target is green again.
 
   The circuit breaker's red count is the number of distinct
-  `(repository, workflow run id)` pairs with at least one failed policy acceptance job.
-  Each pair counts once, using the earliest such failed attempt's forge completion time
-  for the policy window.
+  `(repository, target commit)` pairs with at least one failed policy acceptance job.
+  Each pair counts once, using the earliest such failed attempt's forge completion time,
+  across every run on that commit, for the policy window.
   Re-reading a result, failing another job in the same run, or failing a later attempt
-  does not add another red or move that time. A later successful attempt does not erase
+  does not add another red or move that time. Another failed run on the same target
+  commit does not add another red either. A later successful attempt does not erase
   the historical failure. Missing or invalid identity or completion time makes the count
   `unknown` under G20; it is not treated as zero.
 - **Circuit breaker.** The breaker is kept per governed repository.
@@ -667,8 +670,11 @@ report is recorded as `unknown`.
 decision:
 
 - **10 consecutive pull requests** whose gate decision matched the operator's, with at
-  least 3 passes among them;
-- **the live negative tests** below, all passing on a test repository.
+  least 3 passes among them. These are real pull requests in a normal governed
+  repository; synthetic gate decisions and operator comparisons from the isolated
+  verification context never count toward them;
+- **the live negative tests** below, all passing on a test repository with the released
+  binary.
 
 These numbers are pilot values, reviewed after the first month.
 
@@ -683,6 +689,33 @@ There are two kinds of test:
   production, as `AGENTS.md` requires. They use recorded forge responses.
 - **Live tests** run against a dedicated test repository on GitHub. Recorded responses
   cannot prove how the forge behaves.
+
+Both kinds run in the **isolated verification context**:
+
+- **Separation.** Tests use a separate state directory whose test classification is
+  immutable, separate host settings and credentials, and an explicit allowlist of
+  fixture repository identities and endpoints. A test store cannot be reopened as a
+  normal store or contribute records to a normal repository's shadow-promotion evidence.
+- **Binary.** Deterministic tests may run the development binary through the production
+  command entry point. The check that kwoon runs a released version still reports its
+  true result; the test context permits running without presenting that result as
+  verified. Live-negative qualification uses the released binary. Every normal governed
+  repository requires a released binary in both shadow and live modes (see "Gate and
+  handoff").
+- **Transport.** Extra TLS roots apply only to the configured fixture endpoints and
+  test-proxy connections, Git subprocesses included. Normal clients and repositories
+  never inherit them.
+- **Mode switch.** Test classification does not bypass the production mode-switch state
+  machine. Tests of already-authorized actions may seed the complete, valid authorization
+  history in the isolated fixture store: the request to enter live mode, its
+  qualification evidence, the operator question and answer, and the resulting effective
+  mode linked to that answer. Mode-switch tests create and validate that complete history
+  through the production commands; they do not seed the transition under test. All such
+  fixture records remain test evidence and cannot qualify a normal repository for live
+  mode.
+- **Evidence.** Test records stay identifiable as test evidence. The live-negative report
+  may serve as the required test result for moving to live, but synthetic gate decisions
+  and operator comparisons never count toward the 10 real pull requests.
 
 | Guarantee | Negative test | Kind |
 |---|---|---|
@@ -699,7 +732,7 @@ There are two kinds of test:
 | G11 | The merger merges at a head kwoon did not hand off; the audit flags it. | Live |
 | G12 | The pull request and the target branch both changed file F since their merge base, and the head does not contain the target tip: the gate fails. Without a shared file, it passes without a sync. The breaker turns on and a "turn off" answer to its question is archived: the breaker is off. An answer to an activation that is already off, or that a new activation replaced, is refused. After a restart, the breaker state rebuilt from records is the same. | Deterministic |
 | G13 | The acceptance run of a handed-off merge is cancelled. kwoon re-runs it and keeps the merge "not accepted" meanwhile; without re-run rights, it raises a question. The acceptance run is missing: kwoon starts it with the manual trigger; where the workflow accepts no manual trigger, kwoon raises a question and the capability report shows G13 as "tracked, not guaranteed" for missing runs. A workflow is cancelled before its job has a result: acceptance stays `not finished` and no red is counted. | Live |
-| G14 | The target turns red: the next handoff is blocked and a question lists the candidate merges. A second red within the breaker window switches on "always sync". Both failed runs and a cancelled one are kept as `check` records with their conclusions; rebuilt from records, target health, the red count, and the breaker state are the same. One run that fails across two attempts counts one red, and so does re-reading it; a second distinct run in the window counts two, and the breaker turns on. `neutral`, `skipped`, and `timed_out` are failed; pending is not finished; missing or unrecognized is `unknown`; and all of this holds the same after a replay. Two runs of the acceptance workflow on one commit, one failed and one passed: the commit's combined result is `failed` in either finishing order. When this is the newest target-branch commit with a finished combined result, the target is red. Repeat with a newer target tip whose combined result is `passed`: a late failure on the older commit leaves the target green. When a late failure changes an earlier `passed` acceptance evaluation of that commit, a superseding `acceptance` record says `failed`. Replay gives the same results. | Deterministic |
+| G14 | The target turns red: the next handoff is blocked and a question lists the candidate merges. A failure on a second target commit within the breaker window switches on "always sync". Both failed runs and a cancelled one are kept as `check` records with their conclusions; rebuilt from records, target health, the red count, and the breaker state are the same. One run that fails across two attempts counts one red, and so does re-reading it. Two failed runs on one target commit count once. Failures on two distinct target commits in the window count twice, and the breaker turns on. `neutral`, `skipped`, and `timed_out` are failed; pending is not finished; missing or unrecognized is `unknown`; and all of this holds the same after a replay. Two runs of the acceptance workflow on one commit, one failed and one passed: the commit's combined result is `failed` in either finishing order. When this is the newest target-branch commit with a finished combined result, the target is red. Repeat with a newer target tip whose combined result is `passed`: a late failure on the older commit leaves the target green. When a late failure changes an earlier `passed` acceptance evaluation of that commit, a superseding `acceptance` record says `failed`. Replay gives the same results. At a fixed evaluation time, use the pilot 14-day window. Commit A has failures in two runs, completed 15 days ago and 1 day ago; commit B first failed 1 day ago. With all three results recorded, the red count is one: A's earliest failure is outside the window. Repeat with the records supplied in the opposite order. Re-reading results and later successful attempts do not change their historical failure times. Missing or invalid target-commit identity or forge completion time makes the count `unknown`, raises a question, and is never treated as zero. Replay preserves these results. | Deterministic |
 | G15 | The round limit is exceeded: the gate fails and asks the operator. | Deterministic |
 | G16 | A pull request changes a policy-layer path with agent approvals only: the gate fails. | Deterministic |
 | G17 | `kwoon policy accept` is given a commit that lowers a floor or removes a policy-layer path; it is refused. A merged policy change has no effect until accepted. | Deterministic |
@@ -721,6 +754,17 @@ Publishing a run's work adds these cases:
 | G7 | Someone else updates the destination branch between the intent and the push: kwoon does not overwrite it, records `failed`, and raises a question. | Deterministic and live |
 | G7 | kwoon opens the pull request and is killed before recording it; the pull request is then closed. After restart, kwoon finds it by marker, head repository and branch, and base repository and branch, and opens no second one. | Deterministic and live |
 | G5 | A push kwoon did not make lands on a pull request branch. kwoon records the old and new heads it saw with author `unknown`, and the gate fails at step 2 until an operator `approval`. | Deterministic and live |
+
+The isolated verification context adds these negative controls:
+
+| Control | Negative test | Kind |
+|---|---|---|
+| Store separation | A test store is opened as a normal store: kwoon refuses to open it. | Deterministic |
+| Promotion evidence | With all other promotion requirements satisfied, supply nine eligible real pull requests, including at least three passes, and one synthetic test observation. The eligible count remains nine and promotion is refused. With ten eligible real pull requests and the operator's valid confirmation, promotion succeeds using the released-binary live-negative report from the isolated context. Synthetic decisions and operator comparisons never enter the real count. | Deterministic |
+| Fixture allowlist | First prove that a listed fixture repository at its listed endpoint can be contacted. Separately attempt an unlisted repository at a listed endpoint and a listed repository through an unlisted endpoint. Neither negative case sends a request; enforce this for both the forge client and Git subprocesses. | Deterministic |
+| TLS roots | Use reachable endpoints with valid hostnames. After configuring test trust, the isolated forge client and Git subprocess successfully connect through their configured fixture endpoints and test-proxy connections using the test CA. Normal clients and Git subprocesses reject that same test-CA-only trust, while their system-trusted positive controls succeed. | Deterministic |
+| Mode switch | Exercise the complete transition through the production commands in the isolated fixture context. With otherwise valid qualification evidence, omit the operator answer, then separately supply an answer to an expired or superseded question: each attempt is rejected and live stays off. A qualified request with a valid current answer activates live once. Missing or invalid qualification prevents activation even with an answer. Replay reconstructs the same authorization and effective mode. | Deterministic |
+| Released binary | With all other prerequisites satisfied, starting either shadow or live operation for a normal governed repository with a development binary is refused; the released-binary controls succeed. Deterministic execution with the development binary succeeds only in the isolated context, while its released-version check remains truthfully unverified. An otherwise passing live-negative report produced with a development binary cannot qualify promotion; the corresponding released-binary report can. | Deterministic |
 
 ## Delivery order
 

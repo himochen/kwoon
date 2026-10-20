@@ -202,7 +202,7 @@ it when available.
 | G5 | State is derived from facts, and each fact has one source. | Floor | Derived state is rebuilt from records. The handoff audit checks the forge's pull request states and merges against kwoon's handoff records. | None needed. |
 | G6 | Tampering with history is detectable. | Degradable | Degraded: detectable up to the last checkpoint kwoon pushed to the policy repository. | A forge that refuses force pushes to the checkpoint branch keeps those checkpoints safe. |
 | G7 | External actions are neither repeated nor lost across crashes. | Floor | Intent, action, and confirmation are recorded separately, with stable ids. "External actions" lists every external write kwoon makes, each with its recovery rule. | None needed. |
-| G8 | Rulings and policy live in git and can be reviewed. | Floor | The policy is in the policy repository. Operator answers that change how the gate judges are written there as well (see "Policy v1"). | None needed. |
+| G8 | Rulings and policy live in git and can be reviewed. | Floor | The policy is in the policy repository. kwoon pushes every ruling (see "Policy v1") to the policy repository's checkpoint branch, and a ruling takes effect only once that push is `done`. | None needed. |
 | G9 | Reviews meet the policy's independence and count; an author never reviews its own change. | Degradable (only along the policy's fallback chain) | Judged from launcher-stamped identities (session, harness, model, family, provider account), never from forge user names. | None needed. |
 | G10 | A verdict carries over only when the system can vouch for the change. | Floor | Strictest form: never carried over. A new head needs a new review. | None needed. |
 | G11 | Only a non-LLM party merges, and the gate is re-evaluated at merge time. | Degradable | Degraded. kwoon does not merge in the MVP. Only kwoon hands off. It re-evaluates handed-off pull requests on every poll and turns one back into a draft when the gate fails. A merge between a change of facts and the next poll is caught afterwards by the audit and post-merge tracking. | A forge rule that blocks merging when the head changed after approval. |
@@ -259,15 +259,16 @@ Kinds:
 | `verdict` | A review result. | review run; repository; pull request; head and base commits; result (`approve`, `request_changes`, `unknown`); finding ids |
 | `finding` | One reported problem. | stable id; pull request; category; severity; status (`open`, `fixed`, `persists`, `dismissed` with a reason); first and last run that saw it |
 | `check` | One CI result read from the forge. | check id from the policy; repository; workflow file and its revision; run id, job id, and attempt; triggering event; commit the result is attached to; commit actually tested, when the forge reports it; conclusion |
-| `approval` | An operator approval. | repository; pull request; head; what it covers (policy-layer paths, sensitive paths, authorship of unlinked commits, adopting an unaccounted change, a fix for a red target); entered through `kwoon approve` |
+| `approval` | An operator approval. | repository; pull request; head; what it covers (policy-layer paths, sensitive paths, authorship of unlinked commits, adopting an unaccounted change, a fix for a red target); entered through `kwoon approve`, or written from an `answer` that adopts an unaccounted change, which it names in `authorized_by` |
 | `gate` | One gate evaluation. | repository id; pull request; target branch; head; target tip evaluated; merge base; evaluator version; input record ids; decision (`pass`, `fail`, `unknown`) and the reason for each step |
 | `handoff` | A handoff, or turning a pull request back into a draft. | repository; pull request; head; the `gate` record it relied on; direction (`ready`, `back-to-draft`) and why |
 | `merge` | A merge kwoon observed on the forge. | repository; pull request; merge commit; head at merge; matching `handoff` record, or `none` |
 | `audit` | One handoff audit. | repository; what was checked; result (`clean`, `unaccounted`, `rewritten`); the pull requests or commits that do not match |
 | `acceptance` | Tracking of one merge to a finished acceptance result. | merge records covered; `check` records; outcome (`passed`, `failed`, `not finished`) |
 | `capability` | One item of the capability report. | item; scope (host or repository); status (`verified`, `not provided`, `unknown`); the test that proved it; valid until |
-| `question` | A question to the operator. | subject; the facts it depends on (repository, pull request, head, policy commit); deadline; answer; what made it lapse |
-| `action` | An external action kwoon takes. | intent id; operation; target; state (`intended`, `done`, `failed`, `unknown`); external id. For a push: destination repository and branch, the remote head expected there or `absent`, and the run's start and final heads. For opening a pull request: the head repository and branch, the base repository and branch, and the `push` records it links. For re-running an acceptance check: the target commit, the check id, the merges covered, and the run ids and attempts already seen. |
+| `question` | A question to the operator. | subject; the facts it depends on (repository, pull request, head, policy commit); deadline; the choices it offers. The record is never edited: its answer is a later `answer` record, and its lapse is derived from later records that change a fact it depends on (G21). |
+| `answer` | An operator answer to one question, entered through `kwoon answer`. | the `question` it answers; the facts as kwoon showed them with the question; the choice made, from the question's choices (for example: dismiss a finding, with a reason; adopt or revert an unaccounted change; turn off the sync circuit breaker); whether it is a ruling (see "Policy v1") |
+| `action` | An external action kwoon takes. | intent id; operation; target; state (`intended`, `done`, `failed`, `unknown`); external id. For a push: destination repository and branch, the remote head expected there or `absent`, and the run's start and final heads. For opening a pull request: the head repository and branch, the base repository and branch, and the `push` records it links. For re-running an acceptance check: the target commit, the check id, the merges covered, and the run ids and attempts already seen. For pushing a ruling: the `approval` or `answer` record it carries. |
 
 Rules:
 
@@ -296,6 +297,10 @@ Rules:
   job with the right name from another workflow, and a plain commit status do not count.
 - **The store is append-only.** A correction is a new record that names the old one in
   `supersedes`.
+- **An answer acts only through new records.** What an `answer` causes is written as a
+  new record that names it in `authorized_by`: for example a `finding` with status
+  `dismissed` that supersedes the earlier one, or an `approval` that adopts an
+  unaccounted change. No earlier record is edited.
 - **A gate decision can be replayed.** The `gate` record names the evaluator version and
   every input record, so the same inputs give the same decision.
 
@@ -337,10 +342,14 @@ floor guarantee.
 | Model families | Model id → family | Used to judge `cross-family`. An unlisted model is `unknown`. |
 | Sync circuit breaker | Red count and window | Pilot value: 2 red target runs in 14 days. Once on, it stays on until the operator turns it off with `kwoon answer`. |
 
-Answers that change how the gate judges are rulings. Examples: dismissing a finding, or
-accepting a change kwoon did not hand off. Such an answer takes effect for the case at
-hand. The operator writes any lasting change into the policy repository, as an accepted
-policy commit (G8).
+**Rulings (G8).** A ruling is an operator decision about one case that changes how the
+gate judges: every `approval`, and every `answer` that dismisses a finding, adopts a
+change kwoon did not hand off, or turns off the sync circuit breaker. A ruling applies
+only to the case at hand. kwoon pushes each ruling to the policy repository's checkpoint
+branch (see "External actions"); the plan fixes the format. A ruling takes effect only
+once that push is `done`; until then the gate judges as if it had not been given. The
+operator writes any lasting change into the policy repository, as an accepted policy
+commit.
 
 ## Gate and handoff
 
@@ -439,6 +448,8 @@ repository.
   call these commands with effect.
 - Other processes of the operator's operating-system user can call them (see "Trust
   model"). The capability report shows this.
+- An approval, or an answer that is a ruling, takes effect only once kwoon has pushed
+  it to the policy repository (see "Policy v1").
 - Approvals and answers given anywhere else do not count. This includes forge reviews
   and comments from the operator's own account, and an upstream maintainer's approval.
   kwoon shows them to the operator as information.
@@ -455,7 +466,7 @@ it neither repeats nor loses it (G7):
 | Mark ready, turn back into a draft | Read the pull request's state. The target state is idempotent: setting it again changes nothing. |
 | Request reviewers | Read the requested reviewers; request only the missing ones. |
 | Post the handoff comment | The comment carries the intent id in a hidden marker. Search the pull request's comments for it before posting again. |
-| Push a checkpoint | Read the checkpoint branch; a checkpoint already there is not pushed again. |
+| Push a checkpoint or a ruling | Read the checkpoint branch; a checkpoint or ruling already there is not pushed again. |
 | Re-run an acceptance check (G13) | Before the request, the intent records the target commit, the acceptance check id, and every run id and attempt of that check's workflow kwoon has seen on the target branch. Read that workflow's runs on the target branch. A run id or attempt not in the recorded set, on a commit that contains the merges the intent covers, means the re-run was accepted: kwoon records it and requests no other. None: request the re-run again. A request the forge refuses is recorded `failed` and raises a question; kwoon does not retry it. |
 
 These are all the external writes kwoon makes in the MVP; it makes no other. An operation
@@ -577,8 +588,8 @@ There are two kinds of test:
 | G4 | From inside the wrapper, writing to the store fails; the capability report shows G4 as degraded. | Deterministic |
 | G5 | Derived state is deleted and rebuilt from records; every gate decision is the same. A pull request is marked ready from the operator's account without a handoff; it goes back to draft and a question is raised. | Deterministic and live |
 | G6 | One old record is edited and the chain recomputed; comparison with the last pushed checkpoint finds it. | Deterministic |
-| G7 | For each operation in "External actions", kwoon is killed after the forge or git remote accepts the request but before kwoon records it: marking a pull request ready, turning it back into a draft, requesting reviewers, posting the handoff comment, pushing a run's commits, opening a draft pull request, pushing a checkpoint, and re-running an acceptance check. After restart, it records each action once, and repeats none: no second comment, no second push, no second pull request, no second checkpoint, and no second re-run. | Deterministic and live |
-| G8 | A policy that exists only in the store and not in git: `kwoon doctor` refuses to start. | Deterministic |
+| G7 | For each operation in "External actions", kwoon is killed after the forge or git remote accepts the request but before kwoon records it: marking a pull request ready, turning it back into a draft, requesting reviewers, posting the handoff comment, pushing a run's commits, opening a draft pull request, pushing a checkpoint, pushing a ruling, and re-running an acceptance check. After restart, it records each action once, and repeats none: no second comment, no second push, no second pull request, no second checkpoint or ruling, and no second re-run. | Deterministic and live |
+| G8 | A policy that exists only in the store and not in git: `kwoon doctor` refuses to start. An `answer` dismisses a blocking finding and an `approval` covers a policy-layer path, while pushes to the policy repository fail: the gate still fails on both. Once both rulings are pushed, the gate passes, and each can be read from the checkpoint branch. | Deterministic |
 | G9 | Each of these is rejected: a review from the author's own session; a review whose model is unknown; a same-family review on a `cross-family` path. Two verdicts from one review run count once. | Deterministic |
 | G10 | A new commit is pushed after an approval. The gate fails until a new review of the new head; if the pull request was handed off, it goes back to draft. | Deterministic and live |
 | G11 | The merger merges at a head kwoon did not hand off; the audit flags it. | Live |
@@ -650,6 +661,7 @@ after the first month:
 | kwoon runs no CI. | Running pull-request code on the operator's machine is the larger risk. The CI configuration is a policy-layer path, so a pull request cannot quietly change how checks run. |
 | G13 is a floor only where the operator's account can re-run the target branch's CI; elsewhere kwoon tracks every merge and asks the operator. G14 raises a question instead of opening an issue. | kwoon cannot re-run CI it has no rights to, and should not open issues in someone else's project. Keeping G13 a floor everywhere would stop kwoon from starting in those repositories. |
 | The kwoon host polls the forge; it opens no inbound port. | The host is a personal machine; no public endpoint to defend. While the host is down, nothing is handed off (fail closed). Already handed-off pull requests can still be merged; the audit checks them when the host is back. |
+| Rulings take effect only after kwoon pushes them to the policy repository. | G8 is a floor: an operator decision that changes how the gate judges must be reviewable in git before it acts, not only in the host's store. Cost: while the policy repository cannot be reached, approvals and rulings wait, and nothing they would unblock is handed off (fail closed). |
 | Event-store checkpoints go to a branch in the policy repository. | A second copy outside the host, in a repository the operator controls, on any forge or none. |
 | No verdict carry-over in the MVP. | The floor (G10) holds trivially. Cost: a required sync also means a new review. Carry-over needs its own equivalence rule and tests. |
 

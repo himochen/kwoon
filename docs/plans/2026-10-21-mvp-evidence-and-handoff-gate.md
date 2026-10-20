@@ -8,7 +8,8 @@
   starts (`AGENTS.md`, "How work is organized").
 - Drafted: 2026-10-21
 - Revised after the review of `24a470c` (PR #15, comment 6298150357), and after the
-  round-2 review of `b673730` (comments 6298701949 and 6298711520).
+  round-2 review of `b673730` (comments 6298701949 and 6298711520), and after the
+  round-3 review of `cd4c8ca` (comment 6299052089).
 
 ## Inputs
 
@@ -627,7 +628,10 @@ Not bound, so absent by construction:
   before its negative controls. A denied required namespace is a failure, never a skip.
   Optional namespace isolation is reported according to what was actually created.
 
-  The trusted static probe is the kwoon release binary itself, run as `kwoon __probe`.
+  The trusted static probe is the host-side static musl `kwoon` executable under test,
+  run as `kwoon __probe`. T1's deterministic verification uses its development build
+  within the isolated verification context. Normal governed operation and live-negative
+  qualification use the released binary required by D2 and D6.
   bubblewrap's exit code and stderr distinguish its own setup errors from the child's
   exit code. The classification is fixed in T1 from observed messages, for example a
   denied user namespace under Ubuntu 24.04's AppArmor restriction (research A).
@@ -837,8 +841,12 @@ Every gate record includes the effective-mode record among its inputs. A mode ch
 therefore creates a new gate record even when the other inputs and decision are
 unchanged.
 
-T5 uses only modes already authorized in its isolated fixture store. T21 builds this
-state machine.
+T4 records the initial requested shadow mode and effective shadow-mode capability during
+initialization, retaining the required capability fields. T10 includes that
+effective-mode record in every gate evaluation. T5 uses only modes already authorized in
+its isolated fixture store. T21 builds the subsequent request lifecycle and confirmed
+mode transitions. Until T21 is complete, normal governed repositories remain in shadow
+mode.
 
 #### Workspace layout
 
@@ -1045,9 +1053,9 @@ Task ids are stable across revisions of this plan. T22 was added after the revie
 ### Milestone M1: Rust go/no-go
 
 M1 is reached when T1, T2, and T5 are merged and their reports are on #4. Every task
-after T5 lists M1 in its dependencies. T2 and T5 need the isolated verification context,
-so M1, and every task gated by it, waits for the spec revision in #16 (see "Blocked
-tasks").
+after T5 lists M1 in its dependencies. T1, T2, and T5 need the isolated verification
+context, so M1, and every task gated by it, waits for the spec revision in #16 (see
+"Blocked tasks").
 
 **Proof 1 (T1).** It fails in Rust if any of these does:
 
@@ -1082,9 +1090,9 @@ If one of them fails, the work stops at that task:
 | OQ3, harness log writable by the run (held for the maintainer) | T7, and every task that depends on it: T10, T12, T13, T14, T15, T16, T17, T18, T19, T20, T21 | The maintainer decides OQ3, and this plan or the spec records the decision. |
 | OQ7, where the policy repository lives (held for the maintainer) | T12, T13, and through T13: T15, T16, T17, T18, T19, T21 | The maintainer decides OQ7. |
 | The consistent breaker-unit spec revision defined in Q2 (#16) | T18, and T21 | The spec revision in #16 merges. |
-| OQ10, isolated verification context | T2's test transport, T4's test settings, T5, and every task gated by M1 | The spec revision in #16 merges. |
+| OQ10, isolated verification context | T1, and every task that depends on it, directly or through M1 | The spec revision in #16 merges. |
 
-Tasks not blocked by unresolved decisions: T1 and T3. Other tasks retain their listed dependencies and decision prerequisites.
+Every task now depends directly or transitively on #16. The OQ3 and OQ7 holds and all listed task dependencies remain in effect.
 
 ### Labels for acceptance rows
 
@@ -1110,10 +1118,12 @@ assertions of D6, "What every kill test asserts".
 
 ### Slice 1: proofs, then the shadow decision
 
-#### T1. Workspace, CI, and the local-run wrapper (proof 1)
+#### T1. Workspace, CI, and the local-run wrapper (proof 1) — blocked by #16
 
 - **Builds:**
-  - the cargo workspace of D6;
+  - the cargo workspace of D6 and the verification-context bootstrap needed by early
+    commands: a separate state directory with immutable test classification, separate
+    test settings and credentials, and the fixture repository and endpoint allowlist;
   - `rust-toolchain.toml`;
   - a CI workflow for fmt, clippy, test, and the static musl build. The task issue must
     say explicitly that it may add `.github/workflows/`;
@@ -1171,7 +1181,7 @@ assertions of D6, "What every kill test asserts".
       with `-p` or `exec` inside the wrapper, with the inner sandbox off and a private
       home;
     - the output and the probe report are posted on the task issue.
-- **Depends on:** none.
+- **Depends on:** the spec revision in #16, for the isolated verification context.
 
 #### T2. GitHub client, credentials, and the two GraphQL mutations (proof 2) — blocked by #16
 
@@ -1183,7 +1193,10 @@ assertions of D6, "What every kill test asserts".
   - reading a pull request (node id, `isDraft`, head, base, author);
   - `set_draft_state(pr, ready | draft)`. It reads the state first and sends the
     mutation only if the state differs, so the target state is idempotent;
-  - the fake forge and the response-capture script of D6.
+  - the fake forge and the response-capture script of D6;
+  - the isolated context's transport enforcement for the forge client and Git
+    subprocesses, including the fixture allowlist and scoped TLS roots, using T1's
+    bootstrap;
 - **Acceptance rows:** the forge half of G7 [mark ready] and G7 [back to draft]: the
   target state is idempotent, so setting it again changes nothing. T5 and T15 add the
   kill and recovery halves.
@@ -1234,7 +1247,7 @@ assertions of D6, "What every kill test asserts".
     A permission limitation is not evidence that Rust should be replaced by Go.
 - **Depends on:** T1; the spec revision in #16, for the test transport.
 
-#### T3. Event store
+#### T3. Event store — blocked by #16 (through T1)
 
 - **Builds:**
   - `crates/kwoon-store` (D1): the lock and its bounded scopes, the head row, and the
@@ -1244,7 +1257,9 @@ assertions of D6, "What every kill test asserts".
   - schema validation for every record kind of the spec;
   - `kwoon verify` for the local chain;
   - a machine-readable summary printed by every write command after commit, listing the
-    ids of the records it committed.
+    ids of the records it committed;
+  - binding each event store to its context's immutable classification, preserving
+    test-evidence identity and refusing to reopen a test store as normal;
 - **Acceptance rows:**
   - G18 [a record without a policy reference is rejected];
   - G6 [an edited old record is found]: here against the local chain; T13 adds the
@@ -1285,10 +1300,10 @@ assertions of D6, "What every kill test asserts".
   - `kwoon policy accept <commit>`, which reads the file with the git environment of D4,
     runs the floor check, and writes the `policy` record;
   - host settings loading, including the credential sets and the requested mode;
-  - the isolated verification context (D6): its separate state directory with an
-    immutable test classification, its settings and credentials, and its fixture
-    allowlist;
-  - `kwoon init <repository> --anchor <commit>`.
+  - policy and initialization integration with the isolated verification context built
+    in T1–T3; T4 runs the store-separation and fixture-allowlist acceptance controls;
+  - `kwoon init <repository> --anchor <commit>`, including the initial requested-mode
+    and effective shadow-mode records described in D6;
 - **Acceptance rows:**
   - G17 [a commit that lowers a floor, or removes a policy-layer path, is refused; a
     merged policy change has no effect until accepted];
@@ -1314,7 +1329,10 @@ assertions of D6, "What every kill test asserts".
   - Isolated verification context: reopening a test store as normal is refused, and a
     command naming a repository or endpoint outside the fixture allowlist contacts
     nothing.
-- **Depends on:** T3; the spec revision in #16, for the isolated verification context.
+  - Initialization through the production command creates the initial requested shadow
+    mode and effective shadow-mode capability. Repeating initialization with an
+    unchanged request creates no duplicate mode records.
+- **Depends on:** T2, T3; the spec revision in #16, for the isolated verification context.
 
 #### T5. Action journal and pull-request state audit, with the kill test (proof 3) — blocked by #16
 

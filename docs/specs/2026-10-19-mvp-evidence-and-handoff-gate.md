@@ -291,9 +291,9 @@ Rules:
     of modifying or replacing the log is subject to the checked protection. A successful
     write gives `failed`. An unavailable probe, an unrelated write error, or an inability
     to establish those conditions gives `not run`. The `run` record retains the result.
-  - **Protected log.** When the check passed, the evidence is `protected-log`: the
-    per-turn models in the harness's log are the observed models, and they may satisfy
-    policy.
+  - **Protected log.** When the check passed, the evidence is `protected-log`. Only the
+    log's per-turn model reports supply observed identities. The requested model never
+    substitutes for a missing observed identity in this mode.
   - **Launch-record fallback.** When the check failed or was not run, the evidence is
     `launch-record`: the requested model and the harness binary's digest. Each turn's
     identity for policy evaluation is the requested model unless downgraded to
@@ -313,8 +313,12 @@ Rules:
   they name a model. Record and display reported fallbacks without overwriting the
   requested model. In the rules below, "observed models" means the identities permitted
   by the evidence mode above.
-  - A run satisfies a model requirement only if every observed turn satisfies it. A turn
-    whose model is `unknown` satisfies none.
+  - In either evidence mode, a missing or malformed model entry makes that turn's
+    observed identity `unknown`. An empty, malformed, or unreadable log makes the run's
+    observed-model collection `unknown`, not an empty collection. A model requirement is
+    satisfied only when the collection contains at least one turn, every turn has a known
+    identity, and every turn satisfies the requirement. Unknown evidence needed by the
+    gate fails it and raises a question under G20.
   - G9 evaluates the family of every observed model (gate step 5).
 - **Identities are kept apart.** A forge principal, a provider account, a session, and
   the operator are different things. The independence rules below say which one each
@@ -636,8 +640,9 @@ command-line options, settings files in the run's clone, or environment variable
 the wrapper. It records both the requested and the observed value, the observed one from
 the harness's own log; for the model, only as "Observed models" under "Evidence contract
 v1" allows. It is still to verify which of these levers each supported
-harness offers per run, and which values its log reports. A value the harness does not
-report is recorded as `unknown`.
+harness offers per run, and which values its log reports. For reasoning effort and the
+context-compaction window, a value the harness does not report is recorded as `unknown`.
+Model identity follows "Observed models" under "Evidence contract v1".
 
 ## Post-merge tracking
 
@@ -770,6 +775,7 @@ Both kinds run in the **isolated verification context**:
 | G8 | A policy that exists only in the store and not in git: `kwoon doctor` refuses to start. An `answer` dismisses a blocking finding and an `approval` covers a policy-layer path. When the local archive commit fails, the gate still fails on both. When the remote cannot be reached but the local archive succeeds, the gate passes, and the next checkpoint push carries both rulings. kwoon is killed after the archive commit but before the `archive` record: after restart, it records the existing commit and commits nothing twice. | Deterministic |
 | G9 | Each of these is rejected: a review from the author's own session; a review whose model is unknown; a same-family review on a `cross-family` path. Two verdicts from one review run count once. | Deterministic |
 | G9, G20 | The log-protection check passes and every logged turn ran on the requested model: the run's model satisfies policy. With the check passed, one turn falls back to a model of the author's family: a review on a `cross-family` path is rejected, and the `run` record and the handoff summary show the fallback next to, not in place of, the requested model. The canary write succeeds, or the check cannot be run: the evidence is `launch-record` and the check result is `failed` or `not run`. In that mode, a log that matches the requested model leaves it standing; a requested model of `unknown` family stays `unknown` although the log names a listed model. Requested model A with an unprotected log reporting model B for one turn: the record keeps A as requested and B as unverified reported data, and that turn's identity is `unknown`, so the review does not count. A fallback event bound to one turn makes that turn `unknown`; an event that cannot be assigned to a turn makes the run's observed-model collection `unknown`. Replay gives the same results and preserves the distinction between reported data and identities. | Deterministic |
+| G9, G20 | Missing model evidence, in each evidence mode: an empty log, a malformed log, and an unreadable log each make the run's observed-model collection `unknown`; a turn with a missing or malformed model field makes that turn `unknown`. Each fails a model requirement, the gate fails, and a question is raised; missing evidence never passes through an empty-set comparison, and in `protected-log` mode it is never filled from the requested model. A valid multi-turn log whose first and last turns satisfy a requirement but whose middle turn does not fails it; one whose every turn satisfies it passes. | Deterministic |
 | G3, G9 | Protection check: a canary denied by the run's confinement, with a successful harness-side write control, gives `passed`. A successful canary write from a tool gives `failed`. An invalid session-log path, an unavailable probe, an unrelated write error, or a write-capable tool outside the checked protection never gives `passed`. | Deterministic |
 | G10 | A new commit is pushed after an approval. The gate fails until a new review of the new head; if the pull request was handed off, it goes back to draft. | Deterministic and live |
 | G11 | The merger merges at a head kwoon did not hand off; the audit flags it. | Live |

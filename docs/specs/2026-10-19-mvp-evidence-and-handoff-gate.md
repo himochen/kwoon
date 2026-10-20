@@ -479,9 +479,12 @@ cannot read gives `unknown`, and `unknown` fails with its reason (G20).
      - `cross-model`: also no observed model in common;
      - `cross-family`: also no observed family in common.
 
-     Both compare every observed model of the review run with every observed model of
-     each author run (see "Observed models" under "Evidence contract v1"). An `unknown`
-     model or family on either side fails the rule. A run never reviews a change it
+     `cross-model` and `cross-family` compare every observed model of the review run
+     with every observed model of each author run, as defined under "Observed models"
+     (see "Evidence contract v1"). An `unknown` model or family on either side fails
+     these two rules. Independently of the selected independence rule, a review run
+     whose observed-model collection or any turn's observed model is `unknown` is
+     ineligible, including under `fresh-session`. A run never reviews a change it
      authored.
    - **Findings**: no finding at or above the policy's blocking severity is `open` or
      `persists`.
@@ -779,6 +782,7 @@ Both kinds run in the **isolated verification context**:
 | G9 | Each of these is rejected: a review from the author's own session; a review whose model is unknown; a same-family review on a `cross-family` path. Two verdicts from one review run count once. | Deterministic |
 | G9, G20 | The log-protection check passes and every logged turn ran on the requested model: the run's model satisfies policy. With the check passed, one turn falls back to a model of the author's family: a review on a `cross-family` path is rejected, and the `run` record and the handoff summary show the fallback next to, not in place of, the requested model. The canary write succeeds, or the check cannot be run: the evidence is `launch-record` and the check result is `failed` or `not run`. In that mode, a log that matches the requested model leaves it standing; a requested model of `unknown` family stays `unknown` although the log names a listed model. Requested model A with an unprotected log reporting model B for one turn: the record keeps A as requested and B as unverified reported data, and that turn's identity is `unknown`, so the review does not count. A fallback event bound to one turn makes that turn `unknown`; an event that cannot be assigned to a turn makes the run's observed-model collection `unknown`. Replay gives the same results and preserves the distinction between reported data and identities. | Deterministic |
 | G9, G20 | Missing model evidence, in each evidence mode: an empty log, a malformed log, and an unreadable log each make the run's observed-model collection `unknown`; a turn with a missing or malformed model field makes that turn `unknown`. Each fails a model requirement, the gate fails, and a question is raised; missing evidence never passes through an empty-set comparison, and in `protected-log` mode it is never filled from the requested model. A valid multi-turn log whose first and last turns satisfy a requirement but whose middle turn does not fails it; one whose every turn satisfies it passes. | Deterministic |
+| G9 | A review from a different session whose observed model is `unknown` is rejected under each of `fresh-session`, `cross-model`, and `cross-family`. Separately, a review with known models against an author run whose observed model is `unknown` is rejected under `cross-model` and `cross-family`. Any shared model across any reviewer and author turn pair fails `cross-model`, and any shared family fails `cross-family`; disjoint known sets pass when every other prerequisite holds. | Deterministic |
 | G9 | Handoff disclosure: with the policy's full gate summary turned off, a passing handoff still posts the handoff comment, and it shows, for both the author run and the review run, the requested model, the observed models and families, every reported fallback or downgrade, and the model evidence that applied. The fixture pairs a `protected-log` review run with a `launch-record` author run; the author run's reports are labeled unverified and kept apart from the identities the gate used. | Deterministic |
 | G3, G9 | Protection check: a canary denied by the run's confinement, with a successful harness-side write control, gives `passed`. A successful canary write from a tool gives `failed`. An invalid session-log path, an unavailable probe, an unrelated write error, or a write-capable tool outside the checked protection never gives `passed`. | Deterministic |
 | G10 | A new commit is pushed after an approval. The gate fails until a new review of the new head; if the pull request was handed off, it goes back to draft. | Deterministic and live |

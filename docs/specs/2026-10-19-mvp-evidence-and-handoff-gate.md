@@ -172,13 +172,18 @@ kwoon's forge credential (used to read CI, mark ready, request reviewers, and tu
 request back into a draft) lives only on the host, outside every run. kwoon never runs
 candidate code with it: kwoon runs no CI itself.
 
-Two limits follow from the operating-system user being shared:
+Three limits follow from the operating-system user being shared:
 
 - **Integrity is not authenticity.** Another process of the same user can append new
   records with valid hashes. The hash chain detects changes to records before the last
-  checkpoint (G6); it cannot tell a forged new record from a real one. Running kwoon
-  under its own operating-system user closes this gap; it is optional hardening and
-  shows in the capability report.
+  checkpoint (G6); it cannot tell a forged new record from a real one.
+- **Any process of the same user can approve.** A process kwoon did not start, such as
+  an agent session the operator opened directly, can run `kwoon approve`,
+  `kwoon answer`, and `kwoon policy accept`. G2 and G16 protect against runs kwoon starts
+  and against cloud sessions; they do not protect against these processes. The
+  capability report tests this and shows it, together with whether the account has
+  root-equivalent rights (for example membership in the `docker` group, or
+  passwordless `sudo`).
 - **A cloud session can act as the operator on the forge.** It can mark a pull request
   ready, approve it, or merge it where the operator's account may. kwoon cannot prevent
   that; the handoff audit detects it (G5).
@@ -192,11 +197,11 @@ it when available.
 | ID | Guarantee | Level | MVP mechanism (kwoon's own) | Optional forge hardening |
 |---|---|---|---|---|
 | G1 | Agents hold no forge write access for merges, tags, or settings. | Degradable | Degraded. Local runs: yes, credentials hidden by the wrapper. Cloud sessions: no, they hold the operator's connection; what they do anyway is caught by the handoff audit (G5). Where the operator has no merge rights (contributors, company), agents have none either. | A branch rule in the governed repository that stops the operator's account from merging or pushing to the target branch. |
-| G2 | Delegation does not escalate: an action is authorized by its original proposer, a message never authorizes, and the sender is stamped by kwoon. | Floor | Each privileged action records who asked for it and which record authorized it. Only the operator, through the host, authorizes an exception. Forge reviews and comments are never evidence. | None needed. |
+| G2 | Delegation does not escalate: an action is authorized by its original proposer, a message never authorizes, and the sender is stamped by kwoon. | Floor | Each privileged action records who asked for it and which record authorized it. Only the operator, through the host, authorizes an exception. Forge reviews and comments are never evidence. Protects against runs kwoon starts and cloud sessions, not other processes of the operator's own OS user (see "Trust model"). | None needed. |
 | G3 | The capability report lists only verified items, item by item. | Floor | `kwoon doctor` runs a test for each item and keeps its result. | None needed. |
-| G4 | Only kwoon writes the event store. | Degradable | Degraded. Runs cannot reach the store: a cloud session runs on another machine, and the wrapper hides it from local runs. Other processes of the same OS user can still write it. | None. A separate OS user for kwoon is host hardening. |
+| G4 | Only kwoon writes the event store. | Degradable | Degraded. Runs cannot reach the store: a cloud session runs on another machine, and the wrapper hides it from local runs. Other processes of the same OS user can still write it. | None. |
 | G5 | State is derived from facts, and each fact has one source. | Floor | Derived state is rebuilt from records. The handoff audit checks the forge's pull request states and merges against kwoon's handoff records. | None needed. |
-| G6 | Tampering with history is detectable. | Degradable | Degraded: detectable up to the last checkpoint kwoon pushed to the policy repository (Q1). | A forge that refuses force pushes to the checkpoint branch keeps those checkpoints safe. |
+| G6 | Tampering with history is detectable. | Degradable | Degraded: detectable up to the last checkpoint kwoon pushed to the policy repository. | A forge that refuses force pushes to the checkpoint branch keeps those checkpoints safe. |
 | G7 | External actions are neither repeated nor lost across crashes. | Floor | Intent, action, and confirmation are recorded separately, with stable ids. Recovery is defined per operation (see "External actions"). | None needed. |
 | G8 | Rulings and policy live in git and can be reviewed. | Floor | The policy is in the policy repository. Operator answers that change how the gate judges are written there as well (see "Policy v1"). | None needed. |
 | G9 | Reviews meet the policy's independence and count; an author never reviews its own change. | Degradable (only along the policy's fallback chain) | Judged from launcher-stamped identities (session, harness, model, family, provider account), never from forge user names. | None needed. |
@@ -206,7 +211,7 @@ it when available.
 | G13 | The acceptance run after each merge always finishes. | Floor where the operator's account can re-run the target branch's CI; degradable elsewhere | kwoon follows each handed-off merge to a finished acceptance run, and re-runs a cancelled or missing run. Where the operator's account cannot re-run it, kwoon raises a question instead, and the capability report shows G13 as "tracked, not guaranteed" for that repository. | None needed. |
 | G14 | A red target branch pauses further merges, opens a fix issue, and measures time to green. | Tunable | New handoffs pause. Instead of opening a fix issue, kwoon raises a question to the operator that lists the merges the red run covers, and it records time to green. kwoon opens nothing in the governed repository. | None needed. |
 | G15 | Review loops end: a round limit, and findings with stable identities. | Tunable | Round limit and finding records; automatic duplicate detection later. | None needed. |
-| G16 | Sensitive paths always get a human: the policy layer as a floor, CI and credential paths as tunable. | Floor (policy layer), tunable (others) | A `kwoon approve` record for the exact head. Forge approvals do not count. | Code-owner review by a separate person. |
+| G16 | Sensitive paths always get a human: the policy layer as a floor, CI and credential paths as tunable. | Floor (policy layer), tunable (others) | A `kwoon approve` record for the exact head. Forge approvals do not count. Protects against runs kwoon starts and cloud sessions, not other processes of the operator's own OS user (see "Trust model"). | Code-owner review by a separate person. |
 | G17 | A policy change is authorized by the previously approved policy; runs read only approved policy. | Floor | kwoon reads only a policy commit the operator accepted on the host. Before accepting, it checks the new commit against the current policy's floors. | None needed. |
 | G18 | Every record names the policy version in effect. | Floor | The schema rejects a record without it. | None needed. |
 | G19 | kwoon refuses to start when a needed capability is missing and no fallback is written; it re-checks capabilities before a privileged action; floors cannot be configured away. | Floor | `kwoon doctor` at start, and gate step 9 before each handoff. | None needed. |
@@ -430,6 +435,8 @@ repository.
   <what>`, and answers questions with `kwoon answer`, both on the kwoon host.
 - Cloud sessions cannot reach the host. Local runs are started in a wrapper that hides
   kwoon's state and sockets, so they cannot call these commands with effect.
+- Other processes of the operator's operating-system user can call them (see "Trust
+  model"). The capability report shows this.
 - Approvals and answers given anywhere else do not count. This includes forge reviews
   and comments from the operator's own account, and an upstream maintainer's approval.
   kwoon shows them to the operator as information.
@@ -539,7 +546,7 @@ There are two kinds of test:
 | Guarantee | Negative test | Kind |
 |---|---|---|
 | G1 | A local run tries to read kwoon's forge credential and the store; both are absent inside the wrapper. | Deterministic |
-| G2 | A forge review and comment from the operator's account say "approved", and a run's output asks to be treated as the fix for a red target. Neither changes the gate result. | Deterministic |
+| G2 | A forge review and comment from the operator's account say "approved", and a run's output asks to be treated as the fix for a red target. Neither changes the gate result. The capability report shows `kwoon approve` from a process kwoon did not start as reachable, and reports whether the account has root-equivalent rights. | Deterministic |
 | G3 | A capability whose test did not run is reported `unknown`, never `verified`. | Deterministic |
 | G4 | From inside the wrapper, writing to the store fails; the capability report shows G4 as degraded. | Deterministic |
 | G5 | Derived state is deleted and rebuilt from records; every gate decision is the same. A pull request is marked ready from the operator's account without a handoff; it goes back to draft and a question is raised. | Deterministic and live |
@@ -596,7 +603,9 @@ after the first month:
 | The policy lives in a repository the operator controls and takes effect only when accepted on the host. | The operator may not control the governed repository. A merged pull request must not be able to change the policy by itself. |
 | Sync only when files overlap; otherwise hand off and rely on post-merge tracking, with a circuit breaker. | Syncing every change throws away earlier CI and reviews. Red target branches are rare; when they become frequent, the breaker switches to "always sync". Cost: a conflict across different files is found after the merge. |
 | Upstream CI, approvals, and comments are data. | They follow someone else's rules and are written through accounts kwoon cannot tell apart. |
-| Approvals only through `kwoon approve` on the host. | The only channel neither cloud sessions nor wrapped local runs can reach. |
+| Approvals only through `kwoon approve` on the host. | The only channel neither cloud sessions nor wrapped local runs can reach. Cost: no approving from a phone; a second channel needs its own spec. |
+| G6 says "detectable up to the last pushed checkpoint", not "tamper-proof". | Anyone who can write the store file can recompute a local hash chain; only the copy outside the host fixes a point in history. |
+| No approval hardening, now or planned: no separate OS user for kwoon, no hardware-key signatures. | A separate OS user needs root, and does not isolate an account that is already root-equivalent. Hardware-key signatures need a verifier outside the host, or a modified kwoon skips them. Neither pays off for a single operator. The residual is stated in the trust model and tested in the capability report. |
 | kwoon runs no CI. | Running pull-request code on the operator's machine is the larger risk. The CI configuration is a policy-layer path, so a pull request cannot quietly change how checks run. |
 | G13 is a floor only where the operator's account can re-run the target branch's CI; elsewhere kwoon tracks every merge and asks the operator. G14 raises a question instead of opening an issue. | kwoon cannot re-run CI it has no rights to, and should not open issues in someone else's project. Keeping G13 a floor everywhere would stop kwoon from starting in those repositories. |
 | The kwoon host polls the forge; it opens no inbound port. | The host is a personal machine; no public endpoint to defend. While the host is down, nothing is handed off (fail closed). Already handed-off pull requests can still be merged; the audit checks them when the host is back. |
@@ -624,14 +633,8 @@ strategy includes a queue that tests changes on the latest target before merging
 
 ## Open questions for the operator
 
-- **Q1. How is G6 stated?** Recommended wording: "Changes to past records are detectable
-  up to the last checkpoint kwoon pushed to the policy repository." A local hash chain
-  alone cannot stop someone with write access to the file from recomputing the whole
-  chain, so "tamper-proof" would overclaim. It also cannot tell a forged new record from
-  a real one.
-- **Q2. Is approving only at the kwoon host acceptable for the MVP?** Recommended: yes.
-  It is the only channel agents cannot reach without new machinery. The cost is that the
-  operator cannot approve from a phone until a later spec adds a second channel.
+None. Q1 (how G6 is stated) and Q2 (approving only at the host) were settled on
+2026-10-20; see "Decisions taken in this spec".
 
 ## Still to verify (in the plan, before the matching task)
 

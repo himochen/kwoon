@@ -254,7 +254,7 @@ Kinds:
 | Kind | What it records | Key fields |
 |---|---|---|
 | `policy` | A policy commit the operator accepted. | policy repository; commit; previous accepted commit; result of the floor check |
-| `run` | One agent run. | role; task; harness; session id; provider account (opaque id); model requested; harness binary digest; result of the launch-time log-protection check (`passed`, `failed`, `not run`); model evidence that applied (`protected-log` or `launch-record`); observed models, per turn, with every fallback or downgrade the harness reports; family of each observed model; effort requested and observed; context-compaction window; start and end; outcome; log digest; for an authoring run, the publication repository and head branch and the governed repository and base branch, all fixed at launch from host settings, the start head, and the final head |
+| `run` | One agent run. | role; task; harness; session id; provider account (opaque id); model requested; harness binary digest; result of the launch-time log-protection check (`passed`, `failed`, `not run`); model evidence that applied (`protected-log` or `launch-record`); reported models per turn and every reported fallback or downgrade, retained as unverified data in `launch-record` mode; observed identities used for policy evaluation, per turn, or `unknown` for the run when unavailable; family of each observed identity; effort requested and observed; context-compaction window; start and end; outcome; log digest; for an authoring run, the publication repository and head branch and the governed repository and base branch, all fixed at launch from host settings, the start head, and the final head |
 | `push` | One push to a pull request branch, made by kwoon or observed on the forge. | repository; branch; old head (expected by kwoon, or seen on the forge; `absent` for a new branch); new head; publisher (`kwoon`, or `unknown` for an observed push); author run (the run whose clone kwoon published from, or `unknown`); pull request, or `none` when the push came first. A later `action` record links such a push to its pull request; the `push` record is never edited. |
 | `verdict` | A review result. | review run; repository; pull request; head and base commits; result (`approve`, `request_changes`, `unknown`); finding ids |
 | `finding` | One reported problem. | stable id; pull request; category; severity; status (`open`, `fixed`, `persists`, `dismissed` with a reason); first and last run that saw it |
@@ -295,21 +295,24 @@ Rules:
     per-turn models in the harness's log are the observed models, and they may satisfy
     policy.
   - **Launch-record fallback.** When the check failed or was not run, the evidence is
-    `launch-record`: the requested model and the harness binary's digest. The observed
-    model of every turn is then the requested model. The log may only downgrade it to
-    `unknown`: a turn whose logged model differs from the requested one, a reported
-    fallback or downgrade, or a log kwoon cannot read makes the observed model `unknown`.
-    In this mode the log never establishes or upgrades identity. kwoon still records
-    what the log reports, as unverified data.
+    `launch-record`: the requested model and the harness binary's digest. Each turn's
+    identity for policy evaluation is the requested model unless downgraded to
+    `unknown`. A logged mismatch or reported fallback or downgrade makes the affected
+    turn's identity `unknown`. If an event cannot be assigned to particular turns, the
+    run's observed-model collection is `unknown`. The log cannot establish another
+    identity or restore an identity after downgrading it. Retain its reported models and
+    events separately as unverified data.
   - **Residual risk.** In the launch-record fallback, a run that rewrites the log can
     hide a fallback: the requested model then stands although another model served some
     turns. The `run` record states which evidence applied, and the handoff shows it, so
     the merger sees the weaker evidence.
-- **Fallbacks are always recorded.** The observed model is not one value. It is the set
-  of models that served each turn, together with every fallback or downgrade the harness
-  reports, for example a safety mechanism switching a turn from Opus 5.5 to Opus 4.8. A
-  fallback is recorded and shown as observed; it is never folded into the requested
-  value.
+- **Fallbacks are always recorded.** Retain the per-turn model reports and every
+  fallback or downgrade the harness reports, for example a safety mechanism switching a
+  turn from Opus 5.5 to Opus 4.8, separately from the observed-model identities used for
+  policy evaluation. In `launch-record` mode, those reports remain unverified even when
+  they name a model. Record and display reported fallbacks without overwriting the
+  requested model. In the rules below, "observed models" means the identities permitted
+  by the evidence mode above.
   - A run satisfies a model requirement only if every observed turn satisfies it. A turn
     whose model is `unknown` satisfies none.
   - G9 evaluates the family of every observed model (gate step 5).
@@ -766,7 +769,7 @@ Both kinds run in the **isolated verification context**:
 | G7 | For each operation in "External actions", kwoon is killed after the forge or git remote accepts the request but before kwoon records it: marking a pull request ready, turning it back into a draft, requesting reviewers, posting the handoff comment, pushing a run's commits, opening a draft pull request, pushing a checkpoint, re-running a cancelled acceptance run, and starting a missing one. After restart, it records each action once, and repeats none: no second comment, no second push, no second pull request, no second checkpoint, no second re-run, and no second start. Two more re-run cases: after the crash the run cannot be read, so kwoon records `unknown`, raises a question, and re-runs nothing; and someone else started another run on a commit that contains the covered merges while the re-run's attempt is unchanged, so kwoon records that run as its own `check` evidence, records the re-run `unknown`, and raises a question. Two more reviewer-request cases: a requested reviewer submits a review before the restart, so they left the requested list, and kwoon does not request them again while requesting a reviewer with no per-reviewer intent once, after obtaining a complete history read and writing that reviewer's intent; and the review-request history cannot be read, so kwoon records `unknown`, raises a question, and requests nobody. Reviewer-request recovery also covers a removed request, unequal host and forge clocks, incomplete pagination, and an attempted request without a conclusive history match. No attempted request repeats automatically; unresolved intents become `unknown` and raise a question. A reviewer with no per-reviewer intent is requested once. A crash after writing a per-reviewer intent but before submission leaves no new matching event. On restart, kwoon records that intent as `unknown`, raises a question, and does not submit its request automatically. | Deterministic and live |
 | G8 | A policy that exists only in the store and not in git: `kwoon doctor` refuses to start. An `answer` dismisses a blocking finding and an `approval` covers a policy-layer path. When the local archive commit fails, the gate still fails on both. When the remote cannot be reached but the local archive succeeds, the gate passes, and the next checkpoint push carries both rulings. kwoon is killed after the archive commit but before the `archive` record: after restart, it records the existing commit and commits nothing twice. | Deterministic |
 | G9 | Each of these is rejected: a review from the author's own session; a review whose model is unknown; a same-family review on a `cross-family` path. Two verdicts from one review run count once. | Deterministic |
-| G9, G20 | The log-protection check passes and every logged turn ran on the requested model: the run's model satisfies policy. With the check passed, one turn falls back to a model of the author's family: a review on a `cross-family` path is rejected, and the `run` record and the handoff summary show the fallback next to, not in place of, the requested model. The canary write succeeds, or the check cannot be run: the evidence is `launch-record` and the check result is `failed` or `not run`. In that mode, a log that matches the requested model leaves it standing; a log naming another model for one turn, reporting a fallback, or unreadable makes the observed model `unknown`, and the review does not count; a requested model of `unknown` family stays `unknown` although the log names a listed model. Replay gives the same results. | Deterministic |
+| G9, G20 | The log-protection check passes and every logged turn ran on the requested model: the run's model satisfies policy. With the check passed, one turn falls back to a model of the author's family: a review on a `cross-family` path is rejected, and the `run` record and the handoff summary show the fallback next to, not in place of, the requested model. The canary write succeeds, or the check cannot be run: the evidence is `launch-record` and the check result is `failed` or `not run`. In that mode, a log that matches the requested model leaves it standing; a requested model of `unknown` family stays `unknown` although the log names a listed model. Requested model A with an unprotected log reporting model B for one turn: the record keeps A as requested and B as unverified reported data, and that turn's identity is `unknown`, so the review does not count. A fallback event bound to one turn makes that turn `unknown`; an event that cannot be assigned to a turn makes the run's observed-model collection `unknown`. Replay gives the same results and preserves the distinction between reported data and identities. | Deterministic |
 | G3, G9 | Protection check: a canary denied by the run's confinement, with a successful harness-side write control, gives `passed`. A successful canary write from a tool gives `failed`. An invalid session-log path, an unavailable probe, an unrelated write error, or a write-capable tool outside the checked protection never gives `passed`. | Deterministic |
 | G10 | A new commit is pushed after an approval. The gate fails until a new review of the new head; if the pull request was handed off, it goes back to draft. | Deterministic and live |
 | G11 | The merger merges at a head kwoon did not hand off; the audit flags it. | Live |

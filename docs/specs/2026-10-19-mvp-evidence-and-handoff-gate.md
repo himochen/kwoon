@@ -97,8 +97,8 @@ In the MVP:
 6. **Policy v1**: a versioned file in a git repository the operator controls. It takes
    effect only after the operator accepts that commit on the host. Its options are
    closed.
-7. **Run recorder**: starts agent runs, records who ran them from the launcher side, and
-   keeps local runs away from kwoon's state and secrets.
+7. **Run recorder**: starts local agent runs, records who ran them from the launcher
+   side, and keeps them away from kwoon's state and secrets.
 8. **Post-merge tracking**: follows each merge of a handed-off pull request to a
    finished acceptance result. A red target branch pauses new handoffs.
 9. **`kwoon doctor`**: the capability report. kwoon refuses to start when a floor
@@ -108,6 +108,9 @@ Not in the MVP (each needs its own spec):
 
 - **`merge` mode**: kwoon merges itself when the operator has the rights and turns the
   mode on. Merge queues belong to that spec (see "Later: merge mode and merge queues").
+- **Cloud sessions** (for example Claude Code `--cloud`): a cloud session holds the
+  operator's forge connection, which kwoon cannot narrow, and starting one from a program
+  needs a pseudo-terminal, which is not a documented interface.
 - A scheduler that decides the next step for each piece of work.
 - Seats and model routing, and pools of several accounts per harness.
 - Full sandboxing of local agent runs (network filtering, per-role users). The MVP only
@@ -158,35 +161,31 @@ Not in the MVP (each needs its own spec):
   decide what to show the operator. They do not change kwoon's policy.
 - **Not trusted**:
   - anything an agent run produces, including what it says about itself;
-  - text in issues, pull requests, and comments, whoever's account posted it;
-  - cloud sessions, which read public content and can be prompt-injected.
+  - text in issues, pull requests, and comments, whoever's account posted it.
 
-Where each kind of run can reach:
+kwoon starts only local runs (for example Codex, or Claude Code with `-p`). A local run
+runs as the same operating-system user as kwoon, inside a wrapper that hides kwoon's
+state, secrets, and forge credentials. It holds no forge write access while the wrapper
+holds. kwoon is the only publisher of a run's work: it pushes the run's commits and opens
+the draft pull request itself (see "Runs").
 
-| Run kind | Reaches the kwoon host? | Holds forge write access? |
-|---|---|---|
-| Cloud session (for example Claude Code `--cloud`) | No. It runs in the vendor's VM. | Yes, through the account the operator connected. kwoon cannot narrow it. |
-| Local run (for example Codex, or Claude Code with `-p`) | Same operating-system user. kwoon starts it in a wrapper that hides kwoon's state, secrets, and forge credentials. | No, while the wrapper holds. |
+kwoon's forge credential (used to read CI, push a run's commits to its pull request
+branch, open draft pull requests, mark ready, request reviewers, and turn a pull request
+back into a draft) lives only on the host, outside every run. kwoon never runs candidate
+code with it: kwoon runs no CI itself, and publishing runs no hook, configuration, or
+other code from the run's clone.
 
-kwoon's forge credential (used to read CI, mark ready, request reviewers, and turn a pull
-request back into a draft) lives only on the host, outside every run. kwoon never runs
-candidate code with it: kwoon runs no CI itself.
-
-Three limits follow from the operating-system user being shared:
+Two limits follow from the operating-system user being shared:
 
 - **Integrity is not authenticity.** Another process of the same user can append new
   records with valid hashes. The hash chain detects changes to records before the last
   checkpoint (G6); it cannot tell a forged new record from a real one.
 - **Any process of the same user can approve.** A process kwoon did not start, such as
   an agent session the operator opened directly, can run `kwoon approve`,
-  `kwoon answer`, and `kwoon policy accept`. G2 and G16 protect against runs kwoon starts
-  and against cloud sessions; they do not protect against these processes. The
-  capability report tests this and shows it, together with whether the account has
-  root-equivalent rights (for example membership in the `docker` group, or
-  passwordless `sudo`).
-- **A cloud session can act as the operator on the forge.** It can mark a pull request
-  ready, approve it, or merge it where the operator's account may. kwoon cannot prevent
-  that; the handoff audit detects it (G5).
+  `kwoon answer`, and `kwoon policy accept`. G2 and G16 protect against runs kwoon
+  starts; they do not protect against these processes. The capability report tests this
+  and shows it, together with whether the account has root-equivalent rights (for
+  example membership in the `docker` group, or passwordless `sudo`).
 
 ## Guarantees in the MVP
 
@@ -196,10 +195,10 @@ it when available.
 
 | ID | Guarantee | Level | MVP mechanism (kwoon's own) | Optional forge hardening |
 |---|---|---|---|---|
-| G1 | Agents hold no forge write access for merges, tags, or settings. | Degradable | Degraded. Local runs: yes, credentials hidden by the wrapper. Cloud sessions: no, they hold the operator's connection; what they do anyway is caught by the handoff audit (G5). Where the operator has no merge rights (contributors, company), agents have none either. | A branch rule in the governed repository that stops the operator's account from merging or pushing to the target branch. |
-| G2 | Delegation does not escalate: an action is authorized by its original proposer, a message never authorizes, and the sender is stamped by kwoon. | Floor | Each privileged action records who asked for it and which record authorized it. Only the operator, through the host, authorizes an exception. Forge reviews and comments are never evidence. Protects against runs kwoon starts and cloud sessions, not other processes of the operator's own OS user (see "Trust model"). | None needed. |
+| G1 | Agents hold no forge write access for merges, tags, or settings. | Degradable | Provided for runs kwoon starts: the wrapper hides forge credentials from them. Agent sessions the operator opens outside kwoon are not covered (see "Trust model"). Where the operator has no merge rights (contributors, company), agents have none either. | A branch rule in the governed repository that stops the operator's account from merging or pushing to the target branch. |
+| G2 | Delegation does not escalate: an action is authorized by its original proposer, a message never authorizes, and the sender is stamped by kwoon. | Floor | Each privileged action records who asked for it and which record authorized it. Only the operator, through the host, authorizes an exception. Forge reviews and comments are never evidence. Protects against runs kwoon starts, not other processes of the operator's own OS user (see "Trust model"). | None needed. |
 | G3 | The capability report lists only verified items, item by item. | Floor | `kwoon doctor` runs a test for each item and keeps its result. | None needed. |
-| G4 | Only kwoon writes the event store. | Degradable | Degraded. Runs cannot reach the store: a cloud session runs on another machine, and the wrapper hides it from local runs. Other processes of the same OS user can still write it. | None. |
+| G4 | Only kwoon writes the event store. | Degradable | Degraded. Runs cannot reach the store: the wrapper hides it from them. Other processes of the same OS user can still write it. | None. |
 | G5 | State is derived from facts, and each fact has one source. | Floor | Derived state is rebuilt from records. The handoff audit checks the forge's pull request states and merges against kwoon's handoff records. | None needed. |
 | G6 | Tampering with history is detectable. | Degradable | Degraded: detectable up to the last checkpoint kwoon pushed to the policy repository. | A forge that refuses force pushes to the checkpoint branch keeps those checkpoints safe. |
 | G7 | External actions are neither repeated nor lost across crashes. | Floor | Intent, action, and confirmation are recorded separately, with stable ids. Recovery is defined per operation (see "External actions"). | None needed. |
@@ -209,12 +208,12 @@ it when available.
 | G11 | Only a non-LLM party merges, and the gate is re-evaluated at merge time. | Degradable | Degraded. kwoon does not merge in the MVP. Only kwoon hands off. It re-evaluates handed-off pull requests on every poll and turns one back into a draft when the gate fails. A merge between a change of facts and the next poll is caught afterwards by the audit and post-merge tracking. | A forge rule that blocks merging when the head changed after approval. |
 | G12 | A change at risk of conflicting with the target branch is tested on the merged result first. | Tunable | When files the pull request changed were also changed on the target branch since their merge base, the head must contain the target tip before handoff. Otherwise it is handed off without syncing, and post-merge tracking is the fallback. A circuit breaker switches to "always sync" when the target turns red too often. | A forge rule requiring branches to be up to date. |
 | G13 | The acceptance run after each merge always finishes. | Floor where the operator's account can re-run the target branch's CI; degradable elsewhere | kwoon follows each handed-off merge to a finished acceptance run, and re-runs a cancelled or missing run. Where the operator's account cannot re-run it, kwoon raises a question instead, and the capability report shows G13 as "tracked, not guaranteed" for that repository. | None needed. |
-| G14 | A red target branch pauses further merges, opens a fix issue, and measures time to green. | Tunable | New handoffs pause. Instead of opening a fix issue, kwoon raises a question to the operator that lists the merges the red run covers, and it records time to green. kwoon opens nothing in the governed repository. | None needed. |
+| G14 | A red target branch pauses further merges, opens a fix issue, and measures time to green. | Tunable | New handoffs pause. Instead of opening a fix issue, kwoon raises a question to the operator that lists the merges the red run covers, and it records time to green. kwoon opens no issues in the governed repository. | None needed. |
 | G15 | Review loops end: a round limit, and findings with stable identities. | Tunable | Round limit and finding records; automatic duplicate detection later. | None needed. |
-| G16 | Sensitive paths always get a human: the policy layer as a floor, CI and credential paths as tunable. | Floor (policy layer), tunable (others) | A `kwoon approve` record for the exact head. Forge approvals do not count. Protects against runs kwoon starts and cloud sessions, not other processes of the operator's own OS user (see "Trust model"). | Code-owner review by a separate person. |
+| G16 | Sensitive paths always get a human: the policy layer as a floor, CI and credential paths as tunable. | Floor (policy layer), tunable (others) | A `kwoon approve` record for the exact head. Forge approvals do not count. Protects against runs kwoon starts, not other processes of the operator's own OS user (see "Trust model"). | Code-owner review by a separate person. |
 | G17 | A policy change is authorized by the previously approved policy; runs read only approved policy. | Floor | kwoon reads only a policy commit the operator accepted on the host. Before accepting, it checks the new commit against the current policy's floors. | None needed. |
 | G18 | Every record names the policy version in effect. | Floor | The schema rejects a record without it. | None needed. |
-| G19 | kwoon refuses to start when a needed capability is missing and no fallback is written; it re-checks capabilities before a privileged action; floors cannot be configured away. | Floor | `kwoon doctor` at start, and gate step 9 before each handoff. | None needed. |
+| G19 | kwoon refuses to start when a needed capability is missing and no fallback is written; it re-checks capabilities before a privileged action; floors cannot be configured away. | Floor | `kwoon doctor` at start, gate step 9 before each handoff, and a capability check before each publishing action. | None needed. |
 | G20 | When the answer is unknown, ask a human; never guess. | Floor | An unreadable or unknown input fails the gate with its reason and raises a question. | None needed. |
 | G21 | Questions to a human arrive, have a deadline, and lapse when the facts change. | Tunable | Questions live on the host (`kwoon questions`), each with a deadline and the facts it depends on. Answers count only through `kwoon answer`. | None needed. |
 | G22 | Measurements are taken by non-LLM code, out of reach of whatever is being measured. | Degradable | Not provided; the MVP has no scoring. | None. |
@@ -245,7 +244,7 @@ Every record has these fields:
 | `at` | UTC time kwoon wrote it. |
 | `writer` | Always `kwoon` in the MVP. |
 | `origin` | Who started the chain that led here: `operator`, `kwoon`, or a run id. |
-| `authorized_by` | For a privileged action: the record that authorized it (an `approval`, an `answer`, or a passing `gate`). |
+| `authorized_by` | For a privileged action: the record that authorized it (an `approval`, an `answer`, or a passing `gate`). For publishing a run's work only: that run's `run` record (see "Runs"). |
 | `policy` | Policy repository and accepted commit in effect. |
 | `supersedes` | For a correction: the record it replaces. Otherwise empty. |
 | `prev`, `hash` | The hash chain. |
@@ -255,8 +254,8 @@ Kinds:
 | Kind | What it records | Key fields |
 |---|---|---|
 | `policy` | A policy commit the operator accepted. | policy repository; commit; previous accepted commit; result of the floor check |
-| `run` | One agent run. | role; task; harness; session id; provider account (opaque id); model requested and observed; family; effort requested and observed; context-compaction window; start and end; outcome; log digest |
-| `push` | One push to a pull request branch. | repository; pull request; commits added; the run that made it, or `unknown` |
+| `run` | One agent run. | role; task; harness; session id; provider account (opaque id); model requested and observed; family; effort requested and observed; context-compaction window; start and end; outcome; log digest; for an authoring run, the publication repository and head branch and the governed repository and base branch, all fixed at launch from host settings, the start head, and the final head |
+| `push` | One push to a pull request branch, made by kwoon or observed on the forge. | repository; branch; old head (expected by kwoon, or seen on the forge; `absent` for a new branch); new head; publisher (`kwoon`, or `unknown` for an observed push); author run (the run whose clone kwoon published from, or `unknown`); pull request, or `none` when the push came first. A later `action` record links such a push to its pull request; the `push` record is never edited. |
 | `verdict` | A review result. | review run; repository; pull request; head and base commits; result (`approve`, `request_changes`, `unknown`); finding ids |
 | `finding` | One reported problem. | stable id; pull request; category; severity; status (`open`, `fixed`, `persists`, `dismissed` with a reason); first and last run that saw it |
 | `check` | One CI result read from the forge. | check id from the policy; repository; workflow file and its revision; run id, job id, and attempt; triggering event; commit the result is attached to; commit actually tested, when the forge reports it; conclusion |
@@ -268,7 +267,7 @@ Kinds:
 | `acceptance` | Tracking of one merge to a finished acceptance result. | merge records covered; `check` records; outcome (`passed`, `failed`, `not finished`) |
 | `capability` | One item of the capability report. | item; scope (host or repository); status (`verified`, `not provided`, `unknown`); the test that proved it; valid until |
 | `question` | A question to the operator. | subject; the facts it depends on (repository, pull request, head, policy commit); deadline; answer; what made it lapse |
-| `action` | An external action kwoon takes. | intent id; operation; target; state (`intended`, `done`, `failed`, `unknown`); external id |
+| `action` | An external action kwoon takes. | intent id; operation; target; state (`intended`, `done`, `failed`, `unknown`); external id. For a push: destination repository and branch, the remote head expected there or `absent`, and the run's start and final heads. For opening a pull request: the head repository and branch, the base repository and branch, and the `push` records it links. |
 
 Rules:
 
@@ -284,10 +283,13 @@ Rules:
   option compares.
 - **Accounts are opaque ids.** The store and anything published hold no email address or
   user name of a model account.
-- **Every pushed commit has a known author run or the operator's approval.** kwoon links
-  each push on a pull request branch to the run that made it, from that run's log. A push
-  it cannot link (for example, the operator's own, or a maintainer's suggestion commit)
-  makes authorship `unknown` until the operator covers it with an `approval`.
+- **Every pushed commit has a known author run or the operator's approval.** kwoon makes
+  every push of a run's work itself, so it records which run's clone each published
+  commit range came from. This linkage does not depend on reading the run's log. For a
+  push kwoon did not make (for example, the operator's own, or a maintainer's suggestion
+  commit), it records the old and new heads it saw on the forge, with author `unknown`.
+  Such a push makes authorship `unknown` until the operator covers it with an
+  `approval`.
 - **A CI result counts only with its provenance.** A `check` record is written only when
   the job comes from the workflow file and job that the policy names for that check id,
   is attached to the exact head, and concluded `success`. `neutral`, `skipped`, `cancelled`, a
@@ -433,8 +435,8 @@ repository.
 
 - The operator approves with `kwoon approve <pull-request> --head <commit> --covers
   <what>`, and answers questions with `kwoon answer`, both on the kwoon host.
-- Cloud sessions cannot reach the host. Local runs are started in a wrapper that hides
-  kwoon's state and sockets, so they cannot call these commands with effect.
+- Runs are started in a wrapper that hides kwoon's state and sockets, so they cannot
+  call these commands with effect.
 - Other processes of the operator's operating-system user can call them (see "Trust
   model"). The capability report shows this.
 - Approvals and answers given anywhere else do not count. This includes forge reviews
@@ -448,6 +450,8 @@ it neither repeats nor loses it (G7):
 
 | Operation | Recovery after a crash |
 |---|---|
+| Push the run's commits | Read the destination branch's head. If it is the run's final head, the push is done. If it is still the expected head recorded in the intent (or still absent, when the intent says `absent`), push again on the same condition. Anything else is not overwritten: it is recorded `unknown` and raises a question. A push the forge refuses is recorded `failed` and raises a question; kwoon does not retry it. |
+| Open the draft pull request | The description carries the intent id in a hidden marker. Search pull requests in every state in the recorded governed repository for the intent marker and the exact head repository and branch and base repository and branch recorded in the intent. Do not require the current head commit to equal the run's final head. A marker match with different endpoint identities is conflicting evidence: record `unknown`, raise a question, and open no replacement. One match means the pull request was already opened, even when it is closed or merged: kwoon does not open another. No match: open it. Several matches, conflicting evidence, or a search kwoon cannot read is `unknown` and raises a question. |
 | Mark ready, turn back into a draft | Read the pull request's state. The target state is idempotent: setting it again changes nothing. |
 | Request reviewers | Read the requested reviewers; request only the missing ones. |
 | Post the handoff comment | The comment carries the intent id in a hidden marker. Search the pull request's comments for it before posting again. |
@@ -458,37 +462,57 @@ question instead of retrying blindly.
 
 ## Runs
 
-`kwoon run` starts one run and writes its `run` record.
+`kwoon run` starts one local run (for example Codex, or Claude Code with `-p`) and
+writes its `run` record.
 
-- **Cloud session (Claude Code)**:
-  - Started with `claude --cloud` in a pseudo-terminal; the CLI refuses to start a cloud
-    session without one.
-  - Follow-up messages go through `claude -p "<message>" --cloud <session-id>`.
-  - kwoon reads the session's event log to observe the model and the actions it took.
-  - The run is told to open its pull request as a draft and never to mark it ready. The
-    audit catches it if it does.
-- **Local run** (for example Codex, or Claude Code with `-p`):
-  - It runs in a fresh clone of the head under work, inside a wrapper that hides kwoon's
-    state, secrets, and forge credentials. Bubblewrap mounting an empty directory over
-    them is one way.
-  - The harness's own inner sandbox is turned off inside the wrapper, because nested
-    sandboxes fail to start.
-  - kwoon captures the output itself and records the verdict.
-  - If the wrapper cannot start, `kwoon doctor` reports local runs as unavailable.
+- It runs in a fresh clone of the head under work, inside a wrapper that hides kwoon's
+  state, secrets, and forge credentials. Bubblewrap mounting an empty directory over
+  them is one way.
+- The harness's own inner sandbox is turned off inside the wrapper, because nested
+  sandboxes fail to start.
+- kwoon captures the output itself and records the verdict.
+- **Publishing**: after an authoring run exits, kwoon pushes the run's commits and opens
+  the draft pull request with its own forge credential. The run never pushes and never
+  opens or changes a pull request.
+  - **Authorization**: publishing is authorized by the run's `run` record, which kwoon
+    wrote on the host when the operator started the run with `kwoon run`. At launch,
+    kwoon records from trusted host settings both the publication repository and head
+    branch, and the governed repository and base branch. This run record authorizes
+    pushing only to the recorded publication repository and head branch, and opening the
+    draft pull request only in the recorded governed repository, from that head
+    repository and branch to that base branch. Neither publishing action may substitute
+    these identities from run output or clone configuration.
+    Without that record, or for a destination it does not name, kwoon makes no external
+    write. Before each publishing action, kwoon re-checks the capabilities that action
+    needs (G19).
+  - kwoon pushes only to the run's pull request branch, never to the target branch. The
+    repository is the one the setting allows: the governed repository where the operator
+    may push branches, or the operator's fork when contributing to someone else's
+    project.
+  - **History**: before publishing, kwoon checks that the run's recorded start head is an
+    ancestor of its final head. If it is not, kwoon does not publish: it records the
+    action `failed` and raises a question. If ancestry cannot be read, the outcome is
+    `unknown`, and kwoon does not publish either.
+  - **No overwrite**: kwoon records the push intent first (see the `action` record), then
+    pushes only if the destination branch is still at the expected remote head, or still
+    absent for a new branch. It never force-pushes. When the branch holds a head kwoon did
+    not expect, kwoon does not push: it records the action `failed` and raises a
+    question.
+  - **Pull request**: the first push can happen before the pull request exists. kwoon
+    then opens the draft pull request and links the push to it by appending a record. A
+    later authoring run on the same pull request pushes to the same branch and reuses
+    that pull request.
+  - kwoon takes only git objects from the run's clone. No hook, configuration, or other
+    code in the clone runs during publishing. The plan fixes the mechanism.
+- If the wrapper cannot start, `kwoon doctor` reports local runs as unavailable.
 
 **Run settings**: for each run, kwoon sets the model, reasoning effort, and
-context-compaction window where the harness allows it. It records both the requested and
-the observed value. For Claude Code cloud sessions, the documented levers are:
-
-- `/model <name>` and `/effort <level>` with an argument;
-- settings committed in the repository's `.claude/settings.json`, or environment
-  variables on the cloud environment;
-- the compaction window, through `CLAUDE_CODE_AUTO_COMPACT_WINDOW` on the environment or
-  `/autocompact <tokens>`. Cloud sessions set the compaction percentage themselves, so
-  it cannot be changed.
-
-It is still to verify which of these can be set per run, and which the session log
-reports. A value the harness does not report is recorded as `unknown`.
+context-compaction window where the harness allows it, through the harness's
+command-line options, settings files in the run's clone, or environment variables inside
+the wrapper. It records both the requested and the observed value, the observed one from
+the harness's own log. It is still to verify which of these levers each supported
+harness offers per run, and which values its log reports. A value the harness does not
+report is recorded as `unknown`.
 
 ## Post-merge tracking
 
@@ -551,7 +575,7 @@ There are two kinds of test:
 | G4 | From inside the wrapper, writing to the store fails; the capability report shows G4 as degraded. | Deterministic |
 | G5 | Derived state is deleted and rebuilt from records; every gate decision is the same. A pull request is marked ready from the operator's account without a handoff; it goes back to draft and a question is raised. | Deterministic and live |
 | G6 | One old record is edited and the chain recomputed; comparison with the last pushed checkpoint finds it. | Deterministic |
-| G7 | kwoon is killed after marking a pull request ready but before recording it, and again after posting the handoff comment. After restart, it records each action once and posts no second comment. | Deterministic and live |
+| G7 | kwoon is killed after marking a pull request ready but before recording it, again after posting the handoff comment, again after pushing a run's commits, and again after opening a draft pull request. After restart, it records each action once, posts no second comment, pushes nothing twice, and opens no second pull request. | Deterministic and live |
 | G8 | A policy that exists only in the store and not in git: `kwoon doctor` refuses to start. | Deterministic |
 | G9 | Each of these is rejected: a review from the author's own session; a review whose model is unknown; a same-family review on a `cross-family` path. Two verdicts from one review run count once. | Deterministic |
 | G10 | A new commit is pushed after an approval. The gate fails until a new review of the new head; if the pull request was handed off, it goes back to draft. | Deterministic and live |
@@ -563,9 +587,23 @@ There are two kinds of test:
 | G16 | A pull request changes a policy-layer path with agent approvals only: the gate fails. | Deterministic |
 | G17 | `kwoon policy accept` is given a commit that lowers a floor or removes a policy-layer path; it is refused. A merged policy change has no effect until accepted. | Deterministic |
 | G18 | A record without a policy reference is rejected by the schema. | Deterministic |
-| G19 | The only account of the required second family is removed, with no fallback written: `kwoon doctor` refuses to start. A capability lapses between evaluation and handoff: the handoff is refused. | Deterministic |
+| G19 | The only account of the required second family is removed, with no fallback written: `kwoon doctor` refuses to start. A capability lapses between evaluation and handoff: the handoff is refused. A capability a publishing action needs lapses before that action: that action makes no external write. | Deterministic |
 | G20 | A required check's result cannot be read: the gate reports `unknown`, fails, and raises a question. | Deterministic |
 | G21 | A question's pull request gets a new head: the question lapses, and an answer to it has no effect. A question past its deadline is raised again. | Deterministic |
+
+Publishing a run's work adds these cases:
+
+| Guarantee | Negative test | Kind |
+|---|---|---|
+| G1 | An authoring run with no forge credential makes commits whose final head descends from its start head. kwoon publishes them and opens the draft pull request, and the `push` record names that run as the author run. | Deterministic and live |
+| G1 | The run's clone carries a hook and a configuration that try to run code and change the destination. Neither works: no code from the clone sees kwoon's credential, and only the destination the `run` record names changes. | Deterministic |
+| G2 | Publishing is attempted with no `run` record authorizing it, again to a push destination the record does not name, and again with a substituted pull request repository or base branch. None of these makes any external write. A valid fork publication succeeds: kwoon pushes to the recorded fork and head branch, and opens the draft pull request in the recorded governed repository against the recorded base branch. | Deterministic |
+| G2, G20 | The run rewrote history, so its start head is not an ancestor of its final head: nothing is published, the action is `failed`, and a question is raised. When ancestry cannot be read: nothing is published, and the outcome is `unknown`. | Deterministic |
+| G7 | A run publishes to a new branch: the intent records `absent`, the branch is created, and the `push` record's old head is `absent`. | Deterministic and live |
+| G7 | kwoon is killed between the push and opening the pull request. After restart, it pushes nothing again, opens one pull request, and appends a record linking the push to it. | Deterministic and live |
+| G7 | Someone else updates the destination branch between the intent and the push: kwoon does not overwrite it, records `failed`, and raises a question. | Deterministic and live |
+| G7 | kwoon opens the pull request and is killed before recording it; the pull request is then closed. After restart, kwoon finds it by marker, head repository and branch, and base repository and branch, and opens no second one. | Deterministic and live |
+| G5 | A push kwoon did not make lands on a pull request branch. kwoon records the old and new heads it saw with author `unknown`, and the gate fails at step 2 until an operator `approval`. | Deterministic and live |
 
 ## Delivery order
 
@@ -577,7 +615,7 @@ is one end-to-end handoff decision on kwoon's own repository in shadow mode:
 - a deterministic evaluator that writes a replayable `gate` record;
 - the negative tests of the guarantees that slice touches.
 
-The audit, live handoff, post-merge tracking, and cloud-session settings follow. No mode
+The audit, live handoff, post-merge tracking, and run settings follow. No mode
 is switched on before `kwoon doctor` shows that its floor guarantees hold. A guarantee
 not built yet is reported `not provided`, never assumed.
 
@@ -603,9 +641,10 @@ after the first month:
 | The policy lives in a repository the operator controls and takes effect only when accepted on the host. | The operator may not control the governed repository. A merged pull request must not be able to change the policy by itself. |
 | Sync only when files overlap; otherwise hand off and rely on post-merge tracking, with a circuit breaker. | Syncing every change throws away earlier CI and reviews. Red target branches are rare; when they become frequent, the breaker switches to "always sync". Cost: a conflict across different files is found after the merge. |
 | Upstream CI, approvals, and comments are data. | They follow someone else's rules and are written through accounts kwoon cannot tell apart. |
-| Approvals only through `kwoon approve` on the host. | The only channel neither cloud sessions nor wrapped local runs can reach. Cost: no approving from a phone; a second channel needs its own spec. |
+| Approvals only through `kwoon approve` on the host. | The only channel wrapped local runs cannot reach. Cost: no approving from a phone; a second channel needs its own spec. |
 | G6 says "detectable up to the last pushed checkpoint", not "tamper-proof". | Anyone who can write the store file can recompute a local hash chain; only the copy outside the host fixes a point in history. |
 | No approval hardening, now or planned: no separate OS user for kwoon, no hardware-key signatures. | A separate OS user needs root, and does not isolate an account that is already root-equivalent. Hardware-key signatures need a verifier outside the host, or a modified kwoon skips them. Neither pays off for a single operator. The residual is stated in the trust model and tested in the capability report. |
+| kwoon publishes a local run's work: it pushes the commits and opens the draft pull request; the run holds no forge credential. | A credential handed to a run can be used for anything it allows, which breaks G1, and narrowing it would rely on forge-side enforcement. Cost: kwoon needs branch-push rights in the publication repository (the governed repository or the operator's fork), and the right to open and manage its pull requests in the governed repository. |
 | kwoon runs no CI. | Running pull-request code on the operator's machine is the larger risk. The CI configuration is a policy-layer path, so a pull request cannot quietly change how checks run. |
 | G13 is a floor only where the operator's account can re-run the target branch's CI; elsewhere kwoon tracks every merge and asks the operator. G14 raises a question instead of opening an issue. | kwoon cannot re-run CI it has no rights to, and should not open issues in someone else's project. Keeping G13 a floor everywhere would stop kwoon from starting in those repositories. |
 | The kwoon host polls the forge; it opens no inbound port. | The host is a personal machine; no public endpoint to defend. While the host is down, nothing is handed off (fail closed). Already handed-off pull requests can still be merged; the audit checks them when the host is back. |
@@ -641,18 +680,17 @@ None. Q1 (how G6 is stated) and Q2 (approving only at the host) were settled on
 - Who may mark a pull request ready, or turn it back into a draft, in a repository the
   operator does not own: the author alone, or only accounts with write access. Also, on
   which plans and repository kinds draft pull requests are available.
-- What a cloud session's GitHub connection can do (mark ready, approve, merge, change
-  settings), with and without repository settings that deny those tools.
 - Whether the operator's account can re-run CI in each kind of governed repository, and
   under what conditions upstream CI runs on a fork's pull request at all.
-- How model, reasoning effort, and the compaction window can be set per cloud session,
-  and which of them the session log reports.
+- How model, reasoning effort, and the compaction window can be set per run for each
+  supported local harness, and which of them the harness's log reports.
 - Which commit a pull-request workflow actually tests (the head, or a test merge with
   the base at that moment), and whether the forge reports it.
-- Whether a follow-up message to an idle cloud session whose VM was reclaimed starts it
-  again.
 - That the local-run wrapper starts with each supported harness, and that the harness
   still reaches its own API inside it.
+- Whether the forge needs an extra permission for kwoon's credential to push changes to
+  CI workflow files, and how a push without it is refused, so that kwoon records it as
+  `failed` and raises a question instead of retrying.
 - Which owners and plans GitHub merge queue is available to (for the later `merge` mode
   spec).
 
@@ -666,8 +704,6 @@ None. Q1 (how G6 is stated) and Q2 (approving only at the host) were settled on
     requests.
 - Renovate Docs, "Automerge": merging only with the rights; otherwise the pull request is
   left for people.
-- Claude Code Docs, "Use Claude Code in the cloud": `--cloud`, follow-ups with `-p`,
-  the GitHub proxy, `/model`, `/effort`, settings, and auto-compaction in cloud sessions.
 - Zuul, config projects: changes to privileged configuration are not tested by their own
   new version, and they need human review. kwoon's rule that the released gate judges
   changes to the gate follows the same idea.

@@ -201,7 +201,7 @@ it when available.
 | G4 | Only kwoon writes the event store. | Degradable | Degraded. Runs cannot reach the store: the wrapper hides it from them. Other processes of the same OS user can still write it. | None. |
 | G5 | State is derived from facts, and each fact has one source. | Floor | Derived state is rebuilt from records. The handoff audit checks the forge's pull request states and merges against kwoon's handoff records. | None needed. |
 | G6 | Tampering with history is detectable. | Degradable | Degraded: detectable up to the last checkpoint kwoon pushed to the policy repository. | A forge that refuses force pushes to the checkpoint branch keeps those checkpoints safe. |
-| G7 | External actions are neither repeated nor lost across crashes. | Floor | Intent, action, and confirmation are recorded separately, with stable ids. Recovery is defined per operation (see "External actions"). | None needed. |
+| G7 | External actions are neither repeated nor lost across crashes. | Floor | Intent, action, and confirmation are recorded separately, with stable ids. "External actions" lists every external write kwoon makes, each with its recovery rule. | None needed. |
 | G8 | Rulings and policy live in git and can be reviewed. | Floor | The policy is in the policy repository. Operator answers that change how the gate judges are written there as well (see "Policy v1"). | None needed. |
 | G9 | Reviews meet the policy's independence and count; an author never reviews its own change. | Degradable (only along the policy's fallback chain) | Judged from launcher-stamped identities (session, harness, model, family, provider account), never from forge user names. | None needed. |
 | G10 | A verdict carries over only when the system can vouch for the change. | Floor | Strictest form: never carried over. A new head needs a new review. | None needed. |
@@ -267,7 +267,7 @@ Kinds:
 | `acceptance` | Tracking of one merge to a finished acceptance result. | merge records covered; `check` records; outcome (`passed`, `failed`, `not finished`) |
 | `capability` | One item of the capability report. | item; scope (host or repository); status (`verified`, `not provided`, `unknown`); the test that proved it; valid until |
 | `question` | A question to the operator. | subject; the facts it depends on (repository, pull request, head, policy commit); deadline; answer; what made it lapse |
-| `action` | An external action kwoon takes. | intent id; operation; target; state (`intended`, `done`, `failed`, `unknown`); external id. For a push: destination repository and branch, the remote head expected there or `absent`, and the run's start and final heads. For opening a pull request: the head repository and branch, the base repository and branch, and the `push` records it links. |
+| `action` | An external action kwoon takes. | intent id; operation; target; state (`intended`, `done`, `failed`, `unknown`); external id. For a push: destination repository and branch, the remote head expected there or `absent`, and the run's start and final heads. For opening a pull request: the head repository and branch, the base repository and branch, and the `push` records it links. For re-running an acceptance check: the target commit, the check id, the merges covered, and the run ids and attempts already seen. |
 
 Rules:
 
@@ -456,9 +456,11 @@ it neither repeats nor loses it (G7):
 | Request reviewers | Read the requested reviewers; request only the missing ones. |
 | Post the handoff comment | The comment carries the intent id in a hidden marker. Search the pull request's comments for it before posting again. |
 | Push a checkpoint | Read the checkpoint branch; a checkpoint already there is not pushed again. |
+| Re-run an acceptance check (G13) | Before the request, the intent records the target commit, the acceptance check id, and every run id and attempt of that check's workflow kwoon has seen on the target branch. Read that workflow's runs on the target branch. A run id or attempt not in the recorded set, on a commit that contains the merges the intent covers, means the re-run was accepted: kwoon records it and requests no other. None: request the re-run again. A request the forge refuses is recorded `failed` and raises a question; kwoon does not retry it. |
 
-An operation whose outcome kwoon cannot read is recorded as `unknown`. kwoon then raises a
-question instead of retrying blindly.
+These are all the external writes kwoon makes in the MVP; it makes no other. An operation
+whose outcome kwoon cannot read is recorded as `unknown`. kwoon then raises a question
+instead of retrying blindly.
 
 ## Runs
 
@@ -575,7 +577,7 @@ There are two kinds of test:
 | G4 | From inside the wrapper, writing to the store fails; the capability report shows G4 as degraded. | Deterministic |
 | G5 | Derived state is deleted and rebuilt from records; every gate decision is the same. A pull request is marked ready from the operator's account without a handoff; it goes back to draft and a question is raised. | Deterministic and live |
 | G6 | One old record is edited and the chain recomputed; comparison with the last pushed checkpoint finds it. | Deterministic |
-| G7 | kwoon is killed after marking a pull request ready but before recording it, again after posting the handoff comment, again after pushing a run's commits, and again after opening a draft pull request. After restart, it records each action once, posts no second comment, pushes nothing twice, and opens no second pull request. | Deterministic and live |
+| G7 | For each operation in "External actions", kwoon is killed after the forge or git remote accepts the request but before kwoon records it: marking a pull request ready, turning it back into a draft, requesting reviewers, posting the handoff comment, pushing a run's commits, opening a draft pull request, pushing a checkpoint, and re-running an acceptance check. After restart, it records each action once, and repeats none: no second comment, no second push, no second pull request, no second checkpoint, and no second re-run. | Deterministic and live |
 | G8 | A policy that exists only in the store and not in git: `kwoon doctor` refuses to start. | Deterministic |
 | G9 | Each of these is rejected: a review from the author's own session; a review whose model is unknown; a same-family review on a `cross-family` path. Two verdicts from one review run count once. | Deterministic |
 | G10 | A new commit is pushed after an approval. The gate fails until a new review of the new head; if the pull request was handed off, it goes back to draft. | Deterministic and live |
@@ -684,6 +686,9 @@ None. Q1 (how G6 is stated) and Q2 (approving only at the host) were settled on
   under what conditions upstream CI runs on a fork's pull request at all.
 - How model, reasoning effort, and the compaction window can be set per run for each
   supported local harness, and which of them the harness's log reports.
+- How kwoon starts an acceptance run that is missing, when there is no run to re-run,
+  and whether the forge then reports the new run on the target branch, so that the
+  re-run recovery rule in "External actions" can find it.
 - Which commit a pull-request workflow actually tests (the head, or a test merge with
   the base at that moment), and whether the forge reports it.
 - That the local-run wrapper starts with each supported harness, and that the harness

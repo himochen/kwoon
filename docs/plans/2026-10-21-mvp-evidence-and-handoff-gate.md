@@ -750,7 +750,7 @@ serve every setting.
 | Setting | Repositories and operations | Credential |
 |---|---|---|
 | The operator's own repository | push branches, open and change pull requests, read CI, re-run, dispatch | A fine-grained token for that owner: contents, pull requests, and actions (write); workflows if T14 shows it is needed |
-| A separate policy repository | fetch the policy, push checkpoints | A fine-grained token for its owner with contents (write). If the owner is the same as above, the same token may list both repositories. |
+| The policy repository, wherever it lives (OQ7) | fetch the policy, push checkpoints | A separate repository: a fine-grained token for its owner with contents (write); under the same owner as the governed repository, the same token may list both repositories. The governed repository itself: the governed repository's route carries these operations, and the policy file is a policy-layer path there (spec, "Policy v1"). |
 | A fork contribution | push to the fork | A fine-grained token for the operator's account, limited to the fork |
 | A fork contribution | in upstream: open the pull request, mark ready, convert back, request reviewers, comment, read CI | A classic token with `public_repo` (or `repo` for a private upstream), because fine-grained tokens cannot contribute there. Used only for these operations. |
 | A company repository, operator in the organization | as for the own repository | A fine-grained token for that organization; the organization may require approval |
@@ -1088,7 +1088,7 @@ If one of them fails, the work stops at that task:
 | Blocked by | Tasks | Released when |
 |---|---|---|
 | OQ3, harness log writable by the run (decided by #18) | T7, and every task that depends on it: T10, T12, T13, T14, T15, T16, T17, T18, T19, T20, T21 | #18's spec revision merges. |
-| OQ7, where the policy repository lives (held for the maintainer) | T12, T13, and through T13: T15, T16, T17, T18, T19, T21 | The maintainer decides OQ7. |
+| OQ7, where the policy repository lives (held for the maintainer) | T12, and through T12: T21 | The maintainer decides OQ7. |
 | The consistent breaker-unit spec revision defined in Q2 (#16) | T18, and T21 | The spec revision in #16 merges. |
 | OQ10, isolated verification context | T1, and every task that depends on it, directly or through M1 | The spec revision in #16 merges. |
 
@@ -1687,7 +1687,7 @@ it.
 
 ### Slice 2: checkpoints, publishing, live handoff, and the audit
 
-#### T13. Checkpoint push and remote verification — blocked by OQ7 and OQ3
+#### T13. Checkpoint push and remote verification — blocked by OQ3
 
 - **Builds:**
   - checkpoint commits and pushes (D3), including the first checkpoint, the cadence rule,
@@ -1701,8 +1701,7 @@ it.
     checkpoint];
   - G8 [when the remote cannot be reached but the local archive succeeds, the gate
     passes, and the next checkpoint push carries both rulings].
-- **Check first:** the maintainer's decision on OQ7, and the policy repository's
-  credential (D6).
+- **Check first:** the policy repository's credential (D6).
 - **Verification:**
   - Deterministic, `cargo test --test checkpoint`:
     - the git kill seam (D6) kills kwoon after a successful push to a local bare remote,
@@ -1726,7 +1725,7 @@ it.
     2. The same store, with the last confirmed push 11 minutes old: the next idle poll
        pushes.
     3. No unpushed records and a push 11 minutes old: an idle poll pushes nothing.
-- **Depends on:** M1, T8, T10; the decision on OQ7.
+- **Depends on:** M1, T8, T10.
 
 #### T14. Publishing an authoring run's work — blocked by OQ3 (through T7)
 
@@ -1781,7 +1780,7 @@ it.
     the live kill seam.
 - **Depends on:** M1, T5, T7, T9, T22.
 
-#### T15. Live handoff and re-evaluation — blocked by OQ3 and OQ7
+#### T15. Live handoff and re-evaluation — blocked by OQ3
 
 - **Builds:**
   - for a passing gate: the `gate` record, the intent, mark ready, request reviewers,
@@ -1814,7 +1813,7 @@ it.
   - Live: the same on the test repository, through the live kill seam.
 - **Depends on:** M1, T10, T13, T14.
 
-#### T16. Handoff audit — blocked by OQ3 and OQ7
+#### T16. Handoff audit — blocked by OQ3
 
 - **Builds:**
   - the audit rule that a merged pull request needs a `handoff` for its head at merge;
@@ -1841,7 +1840,7 @@ it.
 
 ### Slice 3: post-merge tracking
 
-#### T17. Merge observation and acceptance tracking — blocked by OQ3 and OQ7
+#### T17. Merge observation and acceptance tracking — blocked by OQ3
 
 - **Builds:**
   - `merge` records;
@@ -1872,7 +1871,7 @@ it.
   of the multi-run fixtures, and replay equality.
 - **Depends on:** M1, T10, T16.
 
-#### T18. Sync circuit breaker — blocked by #16, OQ3, and OQ7
+#### T18. Sync circuit breaker — blocked by #16 and OQ3
 
 - **Builds:**
   - the red count of Q2;
@@ -1895,7 +1894,7 @@ it.
   makes the count `unknown`, and the gate fails at step 3 with a question.
 - **Depends on:** M1, T17; the consistent breaker-unit spec revision defined in Q2 (#16).
 
-#### T19. Acceptance recovery (G13) — blocked by OQ3 and OQ7
+#### T19. Acceptance recovery (G13) — blocked by OQ3
 
 - **Builds:**
   - per-repository capabilities for re-running the target's CI and for the manual
@@ -2039,8 +2038,9 @@ plan does not change the spec; the maintainer decides each one.
 - **OQ7. Where the policy repository lives (held for the maintainer).** Checkpoints carry
   every record body, including pull request numbers, task names, and opaque account ids.
   kwoon's repository is public. Recommendation from the review: a separate private
-  repository for the pilot, with its own credential row in D6. Blocks T12 and T13 (see
-  "Blocked tasks").
+  repository for the pilot. The location is a deployment choice that the spec makes
+  configurable, and D6's credential design covers either location. To be decided before
+  T12, the only task it blocks, and through T12, T21 (see "Blocked tasks").
 
 ## Proposed, not in this plan
 

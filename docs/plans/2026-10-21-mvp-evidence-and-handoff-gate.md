@@ -712,7 +712,7 @@ incomplete read into `unknown`.
 | Workflow runs of the policy workflow on one commit | `GET /repos/{o}/{r}/actions/workflows/{file}/runs?head_sha=…` | Every page read without error, and the number of distinct runs collected equals `total_count` on every page. A query whose `total_count` is 1,000 or more is complete only through the partitioning in the next column. | Filtered run lists return at most 1,000 results when `head_sha`, `branch`, `event`, `status`, `created`, `actor`, or `check_suite_id` is used [verified 2026-10-20, GitHub REST description]. kwoon then partitions the query by `created` ranges, halving each range until every part is below 1,000 and the parts' counts add up. If that does not converge, the read is `unknown`. |
 | Workflow runs on the target branch (G13 start) | the same endpoint, with `branch=…` and `event=workflow_dispatch` | The same rules. | The same cap and partitioning. |
 | Jobs of one run attempt | `GET /repos/{o}/{r}/actions/runs/{id}/attempts/{n}/jobs` | Every page read; the number of jobs collected equals `total_count`. | None documented [to verify in T6]. |
-| Pull requests for one head (recovery of "Open the draft pull request") | `GET /repos/{o}/{r}/pulls?state=all&head={owner}:{branch}`, in the recorded governed repository, with no `base` filter. The `head` filter takes `user:ref-name` or `organization:ref-name` [verified 2026-10-20, GitHub REST description]. | Every page read; the last page has no `next` link. Whether this endpoint caps its results is [to verify in T14]; until a completion rule and its negative case exist, the read is incomplete. | Not the search API. Search results can be capped and its index can lag behind writes (not verified in this revision), so a pull request kwoon just opened could be missing and kwoon would open a second one. The list endpoint avoids depending on either. **Classification after the read:** kwoon looks for the intent marker in every returned pull request and compares each marker match's head repository, head branch, base repository, and base branch with the intent. One marker match with all four equal: already opened. A marker match with any endpoint different (for example a base that GitHub retargeted after a stacked merge): conflicting evidence, so `unknown`, a question, and no new pull request. Several marker matches: `unknown`. No marker match on a complete read: open it. An incomplete read: `unknown`. **Not covered:** a pull request whose head no longer matches `{owner}:{branch}`, for example after the head branch is renamed, or the head repository is transferred or its owner renamed, is not returned. kwoon then sees no match and could open a second pull request. |
+| Pull requests in the recorded governed repository (recovery of “Open the draft pull request”) | `GET /repos/{o}/{r}/pulls?state=all`, in the recorded governed repository, with neither a `head` nor a `base` filter. | Every page read; the last page has no `next` link. Whether this endpoint caps its results is [to verify in T14]; until a completion rule and its negative case exist, the read is incomplete. | Not the search API. Search results can be capped and its index can lag behind writes (not verified in this revision), so a pull request kwoon just opened could be missing and kwoon would open a second one. The list endpoint avoids depending on either. **Classification after the read:** kwoon looks for the intent marker in every returned pull request and compares each marker match's head repository, head branch, base repository, and base branch with the intent. One marker match with all four equal: already opened. A marker match with any endpoint different (for example a base that GitHub retargeted after a stacked merge): conflicting evidence, so `unknown`, a question, and no new pull request. Several marker matches: record `unknown`, raise a question, and open no replacement. No marker match on a complete read: open it. An unreadable or incomplete search: record `unknown`, raise a question, and open no replacement. **Endpoint changes:** Find the intent marker before comparing endpoint identities. A renamed head branch or a transferred or renamed head repository must not exclude a marker match from the recovery search. Apply the conflicting-evidence rule when any recorded endpoint identity differs. If the required search cannot be read completely, record `unknown`, raise a question, and open no replacement. |
 | Comments on one pull request (handoff comment marker) | `GET /repos/{o}/{r}/issues/{n}/comments` | Every page read; the last page has no `next` link. | [to verify in T15] |
 | Review-request history | the pull request's timeline events | Every page read; the last page has no `next` link; T15 checks for a cap. | [to verify in T15] |
 
@@ -1735,9 +1735,10 @@ it.
     launch from host settings, and the lock scope of D1;
   - the push of D4 (step 9), on the import of T22;
   - the "Push the run's commits" and "Open the draft pull request" actions with their
-    recovery rules. The recovery search uses the pull request list endpoint filtered by
-    head only, and compares the base after reading (D6, "Complete reads"), never the
-    search API;
+    recovery rules. The recovery search uses the pull request list endpoint for all
+    states in the recorded governed repository, without head or base filters, and
+    compares all four endpoint identities after finding the marker (D6, “Complete
+    reads”), never the search API;
   - `push` records, including observed pushes with author `unknown`;
   - the capability re-check before each publishing action.
 - **Acceptance rows:**
@@ -1763,13 +1764,19 @@ it.
     publishing, and only the recorded destination ref changed.
   - Kills: the git kill seam after the push; the fake forge after pull-request creation.
     Each kill test makes the three assertions.
-  - Recovery of "Open the draft pull request", with an existing intent and no recorded
+  - Recovery of “Open the draft pull request”, with an existing intent and no recorded
     outcome:
-    - the marker is found on a pull request with a different base (retargeted): the
-      intent is `unknown`, a question is raised, and no new pull request is opened;
-    - no pull request exists for the head, on a complete read: kwoon opens it once;
-    - an incomplete read (a page fails, or the read is cut short): the intent is
-      `unknown`, and no pull request is opened.
+
+    - A marker match has a different endpoint identity: the intent is `unknown`, a
+      question is raised, and no replacement is opened. Cover a retargeted base and a
+      changed head branch or head-repository identity.
+    - A complete read contains no intent-marker match: kwoon opens the pull request
+      once. Cover both an empty list and a nonempty list of unrelated pull requests.
+    - Several pull requests carry the intent marker: the intent is `unknown`, a question
+      is raised, and no replacement is opened.
+    - The search is unreadable or incomplete, including a failed page, a truncated read,
+      or an unestablished completion rule: the intent is `unknown`, a question is
+      raised, and no pull request is opened.
   - Live: PUB-G1a, PUB-G7a to d, and PUB-G5 on the test repository, with kills through
     the live kill seam.
 - **Depends on:** M1, T5, T7, T9, T22.

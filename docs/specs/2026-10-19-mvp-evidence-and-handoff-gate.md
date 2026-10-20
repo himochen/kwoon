@@ -254,7 +254,7 @@ Kinds:
 | Kind | What it records | Key fields |
 |---|---|---|
 | `policy` | A policy commit the operator accepted. | policy repository; commit; previous accepted commit; result of the floor check |
-| `run` | One agent run. | role; task; harness; session id; provider account (opaque id); model requested and observed; family; effort requested and observed; context-compaction window; start and end; outcome; log digest; for an authoring run, the destination repository and branch fixed at launch, the start head, and the final head |
+| `run` | One agent run. | role; task; harness; session id; provider account (opaque id); model requested and observed; family; effort requested and observed; context-compaction window; start and end; outcome; log digest; for an authoring run, the publication repository and head branch and the governed repository and base branch, all fixed at launch from host settings, the start head, and the final head |
 | `push` | One push to a pull request branch, made by kwoon or observed on the forge. | repository; branch; old head (expected by kwoon, or seen on the forge; `absent` for a new branch); new head; publisher (`kwoon`, or `unknown` for an observed push); author run (the run whose clone kwoon published from, or `unknown`); pull request, or `none` when the push came first. A later `action` record links such a push to its pull request; the `push` record is never edited. |
 | `verdict` | A review result. | review run; repository; pull request; head and base commits; result (`approve`, `request_changes`, `unknown`); finding ids |
 | `finding` | One reported problem. | stable id; pull request; category; severity; status (`open`, `fixed`, `persists`, `dismissed` with a reason); first and last run that saw it |
@@ -267,7 +267,7 @@ Kinds:
 | `acceptance` | Tracking of one merge to a finished acceptance result. | merge records covered; `check` records; outcome (`passed`, `failed`, `not finished`) |
 | `capability` | One item of the capability report. | item; scope (host or repository); status (`verified`, `not provided`, `unknown`); the test that proved it; valid until |
 | `question` | A question to the operator. | subject; the facts it depends on (repository, pull request, head, policy commit); deadline; answer; what made it lapse |
-| `action` | An external action kwoon takes. | intent id; operation; target; state (`intended`, `done`, `failed`, `unknown`); external id. For a push: destination repository and branch, the remote head expected there or `absent`, and the run's start and final heads. For opening a pull request: the `push` records it links. |
+| `action` | An external action kwoon takes. | intent id; operation; target; state (`intended`, `done`, `failed`, `unknown`); external id. For a push: destination repository and branch, the remote head expected there or `absent`, and the run's start and final heads. For opening a pull request: the head repository and branch, the base repository and branch, and the `push` records it links. |
 
 Rules:
 
@@ -451,7 +451,7 @@ it neither repeats nor loses it (G7):
 | Operation | Recovery after a crash |
 |---|---|
 | Push the run's commits | Read the destination branch's head. If it is the run's final head, the push is done. If it is still the expected head recorded in the intent (or still absent, when the intent says `absent`), push again on the same condition. Anything else is not overwritten: it is recorded `unknown` and raises a question. A push the forge refuses is recorded `failed` and raises a question; kwoon does not retry it. |
-| Open the draft pull request | The description carries the intent id in a hidden marker. Search pull requests in every state (open, closed, merged) for the marker with the exact head branch and base branch. One match means the pull request was already opened, even when it is closed or merged: kwoon does not open another. No match: open it. Several matches, conflicting evidence, or a search kwoon cannot read is `unknown` and raises a question. |
+| Open the draft pull request | The description carries the intent id in a hidden marker. Search pull requests in every state in the recorded governed repository for the intent marker and the exact head repository and branch and base repository and branch recorded in the intent. Do not require the current head commit to equal the run's final head. A marker match with different endpoint identities is conflicting evidence: record `unknown`, raise a question, and open no replacement. One match means the pull request was already opened, even when it is closed or merged: kwoon does not open another. No match: open it. Several matches, conflicting evidence, or a search kwoon cannot read is `unknown` and raises a question. |
 | Mark ready, turn back into a draft | Read the pull request's state. The target state is idempotent: setting it again changes nothing. |
 | Request reviewers | Read the requested reviewers; request only the missing ones. |
 | Post the handoff comment | The comment carries the intent id in a hidden marker. Search the pull request's comments for it before posting again. |
@@ -475,9 +475,13 @@ writes its `run` record.
   the draft pull request with its own forge credential. The run never pushes and never
   opens or changes a pull request.
   - **Authorization**: publishing is authorized by the run's `run` record, which kwoon
-    wrote on the host when the operator started the run with `kwoon run`. The
-    destination repository and branch are fixed in that record at launch, from host
-    settings. They never come from the run's output or the clone's configuration.
+    wrote on the host when the operator started the run with `kwoon run`. At launch,
+    kwoon records from trusted host settings both the publication repository and head
+    branch, and the governed repository and base branch. This run record authorizes
+    pushing only to the recorded publication repository and head branch, and opening the
+    draft pull request only in the recorded governed repository, from that head
+    repository and branch to that base branch. Neither publishing action may substitute
+    these identities from run output or clone configuration.
     Without that record, or for a destination it does not name, kwoon makes no external
     write. Before each publishing action, kwoon re-checks the capabilities that action
     needs (G19).
@@ -583,7 +587,7 @@ There are two kinds of test:
 | G16 | A pull request changes a policy-layer path with agent approvals only: the gate fails. | Deterministic |
 | G17 | `kwoon policy accept` is given a commit that lowers a floor or removes a policy-layer path; it is refused. A merged policy change has no effect until accepted. | Deterministic |
 | G18 | A record without a policy reference is rejected by the schema. | Deterministic |
-| G19 | The only account of the required second family is removed, with no fallback written: `kwoon doctor` refuses to start. A capability lapses between evaluation and handoff: the handoff is refused. A capability a publishing action needs lapses before that action: nothing is written. | Deterministic |
+| G19 | The only account of the required second family is removed, with no fallback written: `kwoon doctor` refuses to start. A capability lapses between evaluation and handoff: the handoff is refused. A capability a publishing action needs lapses before that action: that action makes no external write. | Deterministic |
 | G20 | A required check's result cannot be read: the gate reports `unknown`, fails, and raises a question. | Deterministic |
 | G21 | A question's pull request gets a new head: the question lapses, and an answer to it has no effect. A question past its deadline is raised again. | Deterministic |
 
@@ -593,12 +597,12 @@ Publishing a run's work adds these cases:
 |---|---|---|
 | G1 | An authoring run with no forge credential makes commits whose final head descends from its start head. kwoon publishes them and opens the draft pull request, and the `push` record names that run as the author run. | Deterministic and live |
 | G1 | The run's clone carries a hook and a configuration that try to run code and change the destination. Neither works: no code from the clone sees kwoon's credential, and only the destination the `run` record names changes. | Deterministic |
-| G2 | Publishing is attempted with no `run` record authorizing it, and again to a destination the record does not name. Neither makes any external write. | Deterministic |
+| G2 | Publishing is attempted with no `run` record authorizing it, again to a push destination the record does not name, and again with a substituted pull request repository or base branch. None of these makes any external write. A valid fork publication succeeds: kwoon pushes to the recorded fork and head branch, and opens the draft pull request in the recorded governed repository against the recorded base branch. | Deterministic |
 | G2, G20 | The run rewrote history, so its start head is not an ancestor of its final head: nothing is published, the action is `failed`, and a question is raised. When ancestry cannot be read: nothing is published, and the outcome is `unknown`. | Deterministic |
 | G7 | A run publishes to a new branch: the intent records `absent`, the branch is created, and the `push` record's old head is `absent`. | Deterministic and live |
 | G7 | kwoon is killed between the push and opening the pull request. After restart, it pushes nothing again, opens one pull request, and appends a record linking the push to it. | Deterministic and live |
 | G7 | Someone else updates the destination branch between the intent and the push: kwoon does not overwrite it, records `failed`, and raises a question. | Deterministic and live |
-| G7 | kwoon opens the pull request and is killed before recording it; the pull request is then closed. After restart, kwoon finds it by marker, head branch, and base branch, and opens no second one. | Deterministic and live |
+| G7 | kwoon opens the pull request and is killed before recording it; the pull request is then closed. After restart, kwoon finds it by marker, head repository and branch, and base repository and branch, and opens no second one. | Deterministic and live |
 | G5 | A push kwoon did not make lands on a pull request branch. kwoon records the old and new heads it saw with author `unknown`, and the gate fails at step 2 until an operator `approval`. | Deterministic and live |
 
 ## Delivery order

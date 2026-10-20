@@ -284,10 +284,13 @@ Rules:
 - **Observed models: the log is evidence only when the run cannot write it.** A run's
   tools execute as the same operating-system user as the harness, so a log they can
   rewrite cannot establish which model served the run.
-  - **Protection check.** At launch, kwoon attempts a canary write into the harness's
-    session-log location, using the same confinement the run's tools will get. The check
-    passes only if that write fails. The `run` record keeps the result: `passed`,
-    `failed`, or `not run` when the check cannot be run.
+  - **Protection check.** At launch, kwoon attempts a canary write into the actual
+    session-log location under the confinement that will apply to the run's tools. The
+    result is `passed` only when kwoon verifies that the location is writable by the
+    harness, that the canary was denied by that confinement, and that every tool capable
+    of modifying or replacing the log is subject to the checked protection. A successful
+    write gives `failed`. An unavailable probe, an unrelated write error, or an inability
+    to establish those conditions gives `not run`. The `run` record retains the result.
   - **Protected log.** When the check passed, the evidence is `protected-log`: the
     per-turn models in the harness's log are the observed models, and they may satisfy
     policy.
@@ -764,6 +767,7 @@ Both kinds run in the **isolated verification context**:
 | G8 | A policy that exists only in the store and not in git: `kwoon doctor` refuses to start. An `answer` dismisses a blocking finding and an `approval` covers a policy-layer path. When the local archive commit fails, the gate still fails on both. When the remote cannot be reached but the local archive succeeds, the gate passes, and the next checkpoint push carries both rulings. kwoon is killed after the archive commit but before the `archive` record: after restart, it records the existing commit and commits nothing twice. | Deterministic |
 | G9 | Each of these is rejected: a review from the author's own session; a review whose model is unknown; a same-family review on a `cross-family` path. Two verdicts from one review run count once. | Deterministic |
 | G9, G20 | The log-protection check passes and every logged turn ran on the requested model: the run's model satisfies policy. With the check passed, one turn falls back to a model of the author's family: a review on a `cross-family` path is rejected, and the `run` record and the handoff summary show the fallback next to, not in place of, the requested model. The canary write succeeds, or the check cannot be run: the evidence is `launch-record` and the check result is `failed` or `not run`. In that mode, a log that matches the requested model leaves it standing; a log naming another model for one turn, reporting a fallback, or unreadable makes the observed model `unknown`, and the review does not count; a requested model of `unknown` family stays `unknown` although the log names a listed model. Replay gives the same results. | Deterministic |
+| G3, G9 | Protection check: a canary denied by the run's confinement, with a successful harness-side write control, gives `passed`. A successful canary write from a tool gives `failed`. An invalid session-log path, an unavailable probe, an unrelated write error, or a write-capable tool outside the checked protection never gives `passed`. | Deterministic |
 | G10 | A new commit is pushed after an approval. The gate fails until a new review of the new head; if the pull request was handed off, it goes back to draft. | Deterministic and live |
 | G11 | The merger merges at a head kwoon did not hand off; the audit flags it. | Live |
 | G12 | The pull request and the target branch both changed file F since their merge base, and the head does not contain the target tip: the gate fails. Without a shared file, it passes without a sync. The breaker turns on and a "turn off" answer to its question is archived: the breaker is off. An answer to an activation that is already off, or that a new activation replaced, is refused. After a restart, the breaker state rebuilt from records is the same. | Deterministic |

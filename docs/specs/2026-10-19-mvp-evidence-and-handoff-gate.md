@@ -1,6 +1,6 @@
 # MVP: evidence contract and handoff gate
 
-- Status: draft
+- Status: accepted (2026-10-20)
 - Tracking issue: #4
 - Drafted: 2026-10-19
 

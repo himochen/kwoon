@@ -7,7 +7,8 @@
   from `4f80544` when they merge, this plan must be checked against it before any task
   starts (`AGENTS.md`, "How work is organized").
 - Drafted: 2026-10-21
-- Revised after the review of `24a470c` (PR #15, comment 6298150357).
+- Revised after the review of `24a470c` (PR #15, comment 6298150357), and after the
+  round-2 review of `b673730` (comments 6298701949 and 6298711520).
 
 ## Inputs
 
@@ -204,9 +205,10 @@ two outcomes:
   - the executable's path is outside every governed clone and run clone.
 
   Otherwise the item is `not provided`, or `unknown` when the release cannot be read.
-  The spec says the gate "runs from a released version installed on the kwoon host", so
-  every mode on a governed repository needs this item, shadow included. The one
-  exception is a test repository (D6), which is never the operator's real work.
+  The spec says the gate "runs from a released version installed on the kwoon host".
+  Every normal governed repository requires a released binary in both shadow and live
+  modes. Development execution is confined to the approved isolated verification context
+  in D6.
 - **Toolchain.** The Rust toolchain is pinned in `rust-toolchain.toml`. `Cargo.lock` is
   committed.
 - **Platforms.** Linux only in the MVP (decided on #15, OQ8). The wrapper (D5) is
@@ -342,14 +344,12 @@ The commit message is `checkpoint <store id> <size>`, with the trailers
   D4 and the policy repository's credential (D6). Fast-forward only, with
   `--force-with-lease=refs/heads/kwoon-checkpoints:<last pushed commit>`.
 - **First checkpoint.** When the remote has no `kwoon-checkpoints` branch and the store
-  has records, the next pass pushes at once:
-  - the segment starts at `seq` 1;
-  - the commit has no parent;
-  - the push uses `--force-with-lease=refs/heads/kwoon-checkpoints:` with an empty
-    expected value, so it fails if the branch appeared meanwhile.
-
-  If the remote branch exists but names another store id, kwoon pushes nothing and
-  raises a question.
+  has records, push at once. The first record segment starts at `seq` 1. If the local
+  checkpoint branch already contains verified ruling commits for this store, append the
+  checkpoint to that branch and preserve its ruling files and ancestry. Create a
+  parentless checkpoint only when no local checkpoint branch exists. Use an empty
+  expected remote value in the lease, so a branch created meanwhile causes failure.
+  Conflicting local or remote store identity prevents the push and raises a question.
 - **Recovery (G7).** Read the remote branch. If a commit with the intent's
   `Kwoon-Checkpoint-Tip` is there, record the push as done and do not push again.
 - **Cadence (pilot value).** A pass pushes a checkpoint when unpushed records exist and
@@ -391,13 +391,14 @@ verifier.
   - `at`.
 - **Commit message.** `ruling <source record id>`, with the trailer
   `Kwoon-Ruling-Source: <source record id>`.
-- **Durability.** The host's policy clone is configured by kwoon with
-  `core.fsync=committed` (which, unlike git's default `committed,-loose-object`, also
-  hardens loose objects) and `core.fsyncMethod=fsync`. Before writing any `archive`
-  record, kwoon reads both values back through `git config` in the same environment. If
-  either is not the expected value, or git is older than 2.36 (which added `core.fsync`
-  [to verify in T8]), no `archive` record is written: the ruling does not take effect, and
-  kwoon raises a question.
+- **Durability.** Before creating ruling objects or updating `kwoon-checkpoints`, require
+  effective `core.fsync=committed,reference` and `core.fsyncMethod=fsync` in the policy
+  clone. Read both values in the exact Git environment used by those commands. Require a
+  supported Git version whose object and reference writers implement these settings.
+  Recheck before appending `archive`. A missing or unsupported setting, command failure,
+  or failed content/ancestry verification prevents the ruling from taking effect and
+  raises a question. Recovery applies the same requirements. Process-kill tests do not
+  establish power-loss survival.
 - **Verification.** Read the blob back with `git cat-file` and compare bytes. Check that
   the commit is the branch tip or an ancestor of it. Then write the `archive` record.
 - **Crash recovery.** List the local branch's commits with that trailer:
@@ -461,7 +462,13 @@ verifier.
 4. **Frozen snapshot.** After the run's wrapper and PID namespace have exited, so no
    process of the run is left, kwoon copies the clone's object store into a fresh
    snapshot directory. The copy is made in Rust:
-   - every file is opened with `O_NOFOLLOW` relative to an open directory handle;
+   - Acquire the run-clone root from a trusted parent directory descriptor. Open `.git`
+     and every directory component one component at a time with
+     `O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC`; open accepted files relative to those
+     verified descriptors with `O_NOFOLLOW | O_CLOEXEC`, and validate their type and link
+     count with `fstat`. Do not follow a `.git` indirection file, symlinked root, or
+     symlinked ancestor. Apply the same containment rule to every host-side read of
+     run-produced files.
    - only regular files are accepted at these paths:
      - `objects/<2 hex>/<38 hex>`;
      - `objects/pack/pack-<40 hex>.pack`;
@@ -472,6 +479,10 @@ verifier.
      on those paths, an `objects/info/alternates` or `objects/info/http-alternates` file,
      any other entry under `objects/`, or a `reftable/` directory rejects the snapshot.
      The action is `failed` and a question is raised.
+   - A regular, singly linked `objects/pack/pack-<40 hex>.rev` file is recognized as
+     disposable derived metadata. It is not copied into the snapshot or consumed by the
+     packing sandbox. A symlink or special file at that path is rejected. All other
+     unlisted entries remain rejected.
 5. **Final head.** Read from the snapshot's `refs/heads/kwoon/work`, or from that line in
    its `packed-refs`. A symbolic ref, or a value that is not 40 hexadecimal characters,
    makes the final head `unknown`, and nothing is published.
@@ -516,7 +527,7 @@ verifier.
 **Reasons.**
 
 - Nothing kwoon runs with a credential reads any path the run controls. The only reads
-  of the run's files are kwoon's own `O_NOFOLLOW` copy and git inside a sandbox with
+  of the run's files are kwoon's own descriptor-relative copy and git inside a sandbox with
   nothing to leak.
 - Objects pass git's own parser and fsck checks before they are pushed.
 - The push runs entirely from a repository whose configuration kwoon wrote.
@@ -547,15 +558,17 @@ step.
 **Choice: bubblewrap with an allowlist.** One builder in `crates/kwoon-run` produces the
 command line. Runs, the doctor probes, and D4's confined packing all use it. Its parts:
 
-- **Namespaces.** `--unshare-all`, which creates new user, PID, IPC, UTS, network, and
-  cgroup namespaces. Runs add `--share-net`, for the reason below. The packing sandbox
-  does not.
+- **Namespaces.** `--unshare-all`, which unshares IPC, PID, network, and UTS, and tries
+  user and cgroup namespaces; the builder also passes `--unshare-user` and
+  `--unshare-pid`, so the user and PID namespaces are required, not tried. Runs add
+  `--share-net`, for the reason below. The packing sandbox does not.
 - **Process.** `--die-with-parent --new-session --clearenv`, then `--setenv` only for
   `HOME`, `PATH`, `LANG`, `TERM`, and the variables the harness needs, from host
   settings.
 - **Mounts.** `--proc /proc --dev /dev --tmpfs /tmp`. `--ro-bind` for `/usr` and `/etc`,
-  and the usual `/bin`, `/lib`, and `/lib64` links. `--bind <run clone> <same path>`,
-  with the run's working directory there.
+  and the usual `/bin`, `/lib`, and `/lib64` links. Two separate writable bindings:
+  `--bind <run clone> <same path>`, with the run's working directory there, and
+  `--bind <private run home> <home path>`.
 - **A private run home.** A directory under the run's own directory, never the
   operator's home. kwoon creates and seeds it before each run:
   - **Provider credential.** A copy of the harness's provider credential, from the
@@ -567,8 +580,12 @@ command line. Runs, the doctor probes, and D4's confined packing all use it. Its
     `exec`, `--sandbox danger-full-access` [to verify in T1].
   - **Never bound:** the operator's `~/.claude` and `~/.codex`. A writable `~/.claude`
     would let a run add hooks that execute in the operator's next session on the host.
-  - **After the run.** kwoon reads the harness's log from the run home, as data (see
-    open question OQ3). The run home is deleted when the run's records are written.
+  - **After the run.** After the wrapper and its PID namespace have exited, extract only
+    the expected harness-log files through the descriptor-relative containment rule in
+    D4. Reject symlinks at the log, any ancestor, or the run-home root; reject special
+    files and multiply linked regular files before reading their contents. Treat
+    extracted bytes as untrusted data under OQ3. Cleanup must not follow links outside
+    the run home.
   - **Seeding is a copy.** Changes the run makes to its home, its settings, or its
     copied credential never reach the host. T1 tests this. If the provider rotates a
     refresh token when the run uses its copy, the host's credential could stop working.
@@ -596,22 +613,30 @@ Not bound, so absent by construction:
 
 **`kwoon doctor` items for the wrapper.** All of them use the production builder.
 
-- **`wrapper-starts`**, in three stages, each with a 30-second deadline. A failure is
-  reported with its stage:
-  1. **Namespaces.** The builder's namespace and process options, with no binds, run
-     `/usr/bin/true`.
-  2. **Mounts.** The full filesystem setup runs `/usr/bin/true`.
-  3. **Executable.** The full setup runs the probe: the kwoon binary, bound read-only,
-     as `kwoon __probe`.
+- **`wrapper-starts`**, in three stages. A failure is reported with its stage:
+  1. **Namespace setup.** Use the production builder's namespace and process options,
+     with a trusted static probe bound read-only into the otherwise empty filesystem.
+     Require the user and PID namespaces explicitly; report namespace-creation failures
+     separately from probe-execution failures.
+  2. **Filesystem setup.** Run that probe with the complete production mount layout,
+     including separate writable bindings for the run clone and private run home.
+  3. **Harness execution.** Run the configured harness with the same layout and seeded
+     home.
 
+  Each stage has a 30-second deadline. T1 must demonstrate a successful real invocation
+  before its negative controls. A denied required namespace is a failure, never a skip.
+  Optional namespace isolation is reported according to what was actually created.
+
+  The trusted static probe is the kwoon release binary itself, run as `kwoon __probe`.
   bubblewrap's exit code and stderr distinguish its own setup errors from the child's
   exit code. The classification is fixed in T1 from observed messages, for example a
   denied user namespace under Ubuntu 24.04's AppArmor restriction (research A).
 - **`wrapper-hides-state`.** Run by the probe inside the wrapper. Each check must hold:
-  - **Files.** kwoon gives the probe the (device, inode) pairs of the forge credential
-    files, the store, `~/.config/gh`, and `~/.git-credentials`. No path the probe can
-    reach outside `/usr` and `/etc` has any of these pairs, and none of the paths can be
-    opened.
+  - **Files.** Check every mounted tree, including `/usr` and `/etc`, for reachable
+    aliases of the protected files and directories. Direct access and access through an
+    alias must both fail. If the mount layout exposes a protected path or inode, refuse
+    local runs. The protected set is given to the probe as (device, inode) pairs: the
+    forge credential files, the store, `~/.config/gh`, and `~/.git-credentials`.
   - **Mounts.** `/proc/self/mountinfo` lists exactly the mounts the builder declared.
   - **Descriptors.** `/proc/self/fd` holds only 0, 1, and 2.
   - **Sockets.** Connecting to the operator's `SSH_AUTH_SOCK` path and to
@@ -680,15 +705,17 @@ incomplete read into `unknown`.
 
 | Read | Endpoint | Complete when | Known cap and handling |
 |---|---|---|---|
-| Workflow runs of the policy workflow on one commit | `GET /repos/{o}/{r}/actions/workflows/{file}/runs?head_sha=…` | Every page read without error; the number of runs collected equals `total_count` on every page; `total_count` is below 1,000. | Filtered run lists return at most 1,000 results when `head_sha`, `branch`, `event`, `status`, `created`, `actor`, or `check_suite_id` is used [verified 2026-10-20, GitHub REST description]. kwoon then partitions the query by `created` ranges, halving each range until every part is below 1,000 and the parts' counts add up. If that does not converge, the read is `unknown`. |
+| Workflow runs of the policy workflow on one commit | `GET /repos/{o}/{r}/actions/workflows/{file}/runs?head_sha=…` | Every page read without error, and the number of distinct runs collected equals `total_count` on every page. A query whose `total_count` is 1,000 or more is complete only through the partitioning in the next column. | Filtered run lists return at most 1,000 results when `head_sha`, `branch`, `event`, `status`, `created`, `actor`, or `check_suite_id` is used [verified 2026-10-20, GitHub REST description]. kwoon then partitions the query by `created` ranges, halving each range until every part is below 1,000 and the parts' counts add up. If that does not converge, the read is `unknown`. |
 | Workflow runs on the target branch (G13 start) | the same endpoint, with `branch=…` and `event=workflow_dispatch` | The same rules. | The same cap and partitioning. |
 | Jobs of one run attempt | `GET /repos/{o}/{r}/actions/runs/{id}/attempts/{n}/jobs` | Every page read; the number of jobs collected equals `total_count`. | None documented [to verify in T6]. |
 | Pull requests for one head and base (recovery of "Open the draft pull request") | `GET /repos/{o}/{r}/pulls?state=all&head={owner}:{branch}&base={base}` | Every page read; the last page has no `next` link. | Not the search API. Search results can be capped and its index can lag behind writes (not verified in this revision), so a pull request kwoon just opened could be missing and kwoon would open a second one. The list endpoint avoids depending on either. |
 | Comments on one pull request (handoff comment marker) | `GET /repos/{o}/{r}/issues/{n}/comments` | Every page read; the last page has no `next` link. | [to verify in T15] |
 | Review-request history | the pull request's timeline events | Every page read; the last page has no `next` link; T15 checks for a cap. | [to verify in T15] |
 
-A fixture for each row is complete page by page but capped or short of `total_count`.
-Each such fixture must give `unknown`.
+Each endpoint has positive completeness tests and negative tests using evidence that
+endpoint actually exposes. Do not invent `total_count` for array endpoints. Before
+accepting an endpoint whose cap behavior remains unverified, establish its completion
+rule and add the corresponding negative case; otherwise report the read as incomplete.
 
 #### Forge credentials
 
@@ -706,6 +733,15 @@ serve every setting.
   credential id. The forge client picks the credential from that map and nowhere else.
   `kwoon doctor` refuses to start if a pair the policy needs has no credential, and
   reports which pairs use a classic token.
+
+  Routing covers Git fetches and pushes, pull-request reads and writes, comments,
+  reviewer requests and history, Actions reads, and conditional G13 re-run/dispatch
+  operations. Fork pushes use a fork credential with contents write permission. Policy
+  fetches and checkpoint pushes use the policy repository's route. Upstream
+  re-run/dispatch operations receive an explicit route only where the account has the
+  required rights; otherwise G13 is reported as tracked, not guaranteed. Missing routing
+  for an optional unavailable G13 operation does not prevent unrelated operation. No
+  operation falls back to another credential.
 
 | Setting | Repositories and operations | Credential |
 |---|---|---|
@@ -734,39 +770,75 @@ proof.
   - the credential sets and routing above;
   - harness commands and the provider-credential sources for run homes;
   - each governed repository's publication repository and head-branch pattern;
-  - the requested mode, shadow or live, per governed repository (see "Mode switch");
-  - extra TLS root certificates, used only for the live kill tests;
-  - the `test` flag per governed repository.
-- **Test repositories.** A governed repository marked `test = true` is a fake-forge
-  fixture or the dedicated live-test repository. On a test repository only:
-  - a non-released kwoon binary is allowed;
-  - extra TLS roots are used;
-  - live mode needs no confirmation answer.
+  - the requested mode, shadow or live, per governed repository (see "Mode switch").
 
-  `kwoon doctor` lists every test repository. Every `gate` record names the flag. Extra
-  TLS roots are refused for any repository that is not a test repository. See open
-  question OQ10.
+  The settings of an isolated verification context (below) are a separate file, with
+  separate credentials, its fixture allowlist, and its extra TLS roots.
+
+#### Isolated verification context (decided on #15, OQ10; spec revision in #16)
+
+**Isolated verification context.** Test execution uses a separate state directory whose
+test classification is immutable, separate host settings and credentials, and an
+explicit allowlist of fixture repository identities and endpoints. A test store cannot
+be reopened as a normal store or contribute records to normal shadow-promotion evidence.
+
+Deterministic tests may run the development binary through the production command entry
+point. The released-binary check retains its truthful result; the approved test context
+permits execution without representing that result as verified. Live-negative
+qualification uses the released binary.
+
+Extra TLS roots apply only to the explicitly configured fixture endpoints and test-proxy
+connections, including Git subprocesses. Normal clients and repositories never inherit
+them.
+
+Test classification does not bypass the mode-switch state machine. Tests of
+already-authorized actions may seed valid request, qualification, question, answer, and
+effective-mode records in the isolated fixture store. Mode-switch tests create and
+validate those records through the production commands.
+
+All test records remain identifiable as test evidence. The live-negative report may be
+used as the spec's required test result, but synthetic gate decisions and operator
+comparisons never count toward the ten real shadow pull requests.
+
+Required negative controls (T2 for TLS scope, T4 for the store and allowlist, T21 for
+promotion and mode):
+
+- reopening a test store as normal;
+- using test observations toward real promotion;
+- contacting an unlisted repository;
+- leaking test CA trust into a normal client;
+- activating live without a valid confirmation.
+
+This exception changes spec text, so it is settled only once the spec revision in #16
+merges (see "Blocked tasks").
 
 #### Mode switch (decided on #15, OQ5)
 
-No new record kind. Every `gate` record names the mode it ran in, and the record that set
-that mode.
+No new record kind is introduced. Record requested-mode changes by comparing host
+settings with the last recorded request, not with the effective mode. Record the initial
+shadow state. Repeated reads of an unchanged request write nothing.
 
-1. **Recording the requested mode.** When a pass reads a requested mode from host
-   settings that differs from the mode in effect for that repository, it writes a
-   `capability` record: item `mode`, scope that repository, value as requested.
-2. **Confirming a switch to live** (not for test repositories). The pass raises a
-   `question`, "switch <repository> to live?". The question depends on:
-   - the requested mode;
-   - the shadow promotion report (10 consecutive matches with at least 3 passes);
-   - the live negative suite's last result.
-3. **Taking effect.** Live mode takes effect only once an `answer` choosing "live" is
-   recorded. Until then the repository stays in shadow.
-4. **Switching back.** A switch back to shadow takes effect at once. It is recorded the
-   same way, with no question.
+A live request raises one question only after a verified promotion capability identifies
+ten consecutive distinct pull requests whose recorded decisions matched the operator's,
+including at least three passes, and a passing result for every required live negative
+test. Missing, failed, or unknown evidence prevents promotion.
 
-So every switch to live has a request, a question with its facts, and an answer, all in
-the store. T21 builds the confirmation.
+The question names the request record and the exact qualification evidence. A
+withdrawal, replacement request, changed qualifying facts, or deadline expiry lapses it.
+An answer to a lapsed question cannot activate live.
+
+A valid answer choosing live causes a new effective-mode `capability` record naming the
+answer in `authorized_by`. Retain the capability schema's status, proving test, and
+validity fields; requested and effective mode are explicit item-specific fields.
+Switching back to shadow writes a new effective-mode record immediately and invalidates
+pending live requests.
+
+Every gate record includes the effective-mode record among its inputs. A mode change
+therefore creates a new gate record even when the other inputs and decision are
+unchanged.
+
+T5 uses only modes already authorized in its isolated fixture store. T21 builds this
+state machine.
 
 #### Workspace layout
 
@@ -787,7 +859,8 @@ and host settings. It asserts the records written, the decision, and the exit co
 (`AGENTS.md`, "Checks and gates").
 
 - **Fake forge.** A test server under `tests/support/` serves REST and GraphQL over HTTPS
-  from scenario fixtures, with a test CA given as extra TLS roots for a test repository.
+  from scenario fixtures, with a test CA given as extra TLS roots for its endpoint in the
+  isolated verification context.
   It keeps state (draft flag, reviewers, timeline events, workflow runs) and records
   every write.
 - **HTTP kill seam.** The harness gives the fake forge the pid of the `kwoon` process. A
@@ -798,7 +871,8 @@ and host settings. It asserts the records written, the decision, and the exit co
   `update-ref` on `kwoon-checkpoints`), the script sends SIGKILL to kwoon before
   returning. This seam does not depend on hooks, which D4 turns off everywhere.
 - **Live kill seam.** A loopback HTTPS proxy terminates TLS with a test CA, which the
-  release binary accepts only as extra TLS roots for a test repository. It re-originates
+  release binary accepts only as extra TLS roots for the test-proxy connections of the
+  isolated verification context. It re-originates
   TLS to `api.github.com` and `github.com`, waits for GitHub's response to the
   scenario's write, and kills kwoon before forwarding it. Git uses the same proxy and CA
   through `http.proxy` and `GIT_SSL_CAINFO`, set by kwoon from host settings.
@@ -829,23 +903,20 @@ deferred (pending runs, the breaker unit) are Q1 and Q2.
   runs of the policy's workflow file on that commit (D6, "Complete reads").
 - **Pending run.** A run in that list is pending when its status is not `completed` and
   it has no usable completed result for the configured job.
-- **Effect on the combined result:**
-  - a known failure in any run still makes the result `failed`;
-  - otherwise a pending run makes it `not finished`. For a required check, gate step 4
-    fails with the reason "pending: <run ids>" and raises no question; the next poll
-    re-evaluates. For acceptance, the commit stays `not finished`;
-  - a pending run contributes no red.
-- **Incomplete read.** If the run list cannot be read completely, the result is
-  `unknown`: step 4 fails and raises a question (G20), and acceptance stays
-  `not finished` and raises a question.
-- **Persistence for replay.** The observed run set is stored with the decision it
-  affected: run ids, each run's status, and whether the read was complete. It is stored:
-  - in the step-4 reason of the `gate` record;
-  - in an `acceptance` record with outcome `not finished`;
-  - in the step-8 reason of the `gate` record, for target-health reads.
-
-  Replay uses the input `check` records plus the stored set, and does not re-read the
-  forge.
+- **Result and completeness.** A proven current failure remains `failed`; retain and
+  report any incomplete observations. Otherwise, an incomplete read or an unknown run
+  result makes the combined result `unknown` and raises a question. Otherwise, a known
+  pending run prevents a combined pass and contributes no red. With no pending run,
+  apply the spec's existing attempt and combination rules.
+- **Consequences.** For a required check, a pending run makes gate step 4 fail with the
+  reason "pending: <run ids>" and raises no question; the next poll re-evaluates. For
+  acceptance, the commit stays `not finished`. An `unknown` result fails step 4 (G20),
+  and for acceptance means `not finished` with a question.
+- **Persistence for replay.** Every affected `gate` and `acceptance` record, including
+  `passed` and `failed` acceptance outcomes, stores the observed run set and completeness
+  result. Identify the repository, commit, check, workflow, run ids, observed statuses,
+  and input `check` records. Gate steps 4 and 8 retain their respective observations.
+  Replay uses only these recorded inputs.
 - **Evidence kinds.** A `check` retains the job-scoped and workflow-scoped forms defined
   by the spec; pending observations do not create completed-check evidence.
 
@@ -859,8 +930,11 @@ deferred (pending runs, the breaker unit) are Q1 and Q2.
    no red.
 4. The second page of the run list returns an error: `unknown`, the gate fails, and a
    question is raised.
-5. Every page loads, but `total_count` is 1,000 or more, or does not match the runs
-   collected: `unknown`.
+5. A capped initial query is partitioned into complete, non-overlapping ranges. A
+   fixture with more than 1,000 runs whose partitions each fall below the cap is
+   complete and includes every distinct run id. A saturated range that cannot be split,
+   inconsistent totals, duplicate ids hiding missing runs, or an exhausted read deadline
+   gives `unknown`. Persist and replay both outcomes.
 6. Replay of each `gate` and `acceptance` record gives the same result from the stored
    set, with the fake forge stopped.
 
@@ -880,9 +954,13 @@ acceptance workflow.
 **Reason.** The breaker measures bad target revisions, and since #13 runs are combined
 per commit. One bad commit with a push run and a manual run is one bad revision.
 
-**Spec conformance.** The spec says "distinct `(repository, workflow run id)` pairs". A
-one-line spec change to `(repository, target commit)` is needed first. **T18 is blocked
-until that spec change merges.**
+**Spec conformance.** The spec says "distinct `(repository, workflow run id)` pairs". T18
+remains blocked until a spec revision consistently adopts distinct
+`(repository, target commit)` pairs in the counting rule, pilot-value wording, and G14
+acceptance row. The revised acceptance row must state that two failed runs on one target
+commit count once and failures on two distinct target commits count twice. Preserve
+earliest-failure timing, deduplication, replay, and unknown-input behavior. That
+revision is #16.
 
 **Acceptance cases** (deterministic, T18).
 
@@ -967,7 +1045,9 @@ Task ids are stable across revisions of this plan. T22 was added after the revie
 ### Milestone M1: Rust go/no-go
 
 M1 is reached when T1, T2, and T5 are merged and their reports are on #4. Every task
-after T5 lists M1 in its dependencies.
+after T5 lists M1 in its dependencies. T2 and T5 need the isolated verification context,
+so M1, and every task gated by it, waits for the spec revision in #16 (see "Blocked
+tasks").
 
 **Proof 1 (T1).** It fails in Rust if any of these does:
 
@@ -976,8 +1056,13 @@ after T5 lists M1 in its dependencies.
   descriptors closed);
 - a harness that works in bubblewrap cannot be started from Rust.
 
-**Proof 2 (T2).** It fails in Rust if a Rust client cannot authenticate, send both
-mutations, and read the result against GitHub, in each credential setting of D6.
+**Proof 2 (T2).** M1 requires successful draft → ready → draft transitions in the owned,
+fork-contribution, and outside-collaborator fixtures, plus the credential-routing proofs
+assigned to T2. Each credential is tested only for its assigned operations; the policy
+credential is not required to perform pull-request mutations. A refused required
+operation leaves M1 unmet and is reported immediately. Later work does not start until
+the fixture is corrected or the maintainer revises the supported design. A permission
+limitation is not evidence that Rust should be replaced by Go.
 
 **Proof 3 (T5).** It fails in Rust if the kill-and-restart test cannot run through the
 built binary, with its three assertions.
@@ -996,9 +1081,10 @@ If one of them fails, the work stops at that task:
 |---|---|---|
 | OQ3, harness log writable by the run (held for the maintainer) | T7, and every task that depends on it: T10, T12, T13, T14, T15, T16, T17, T18, T19, T20, T21 | The maintainer decides OQ3, and this plan or the spec records the decision. |
 | OQ7, where the policy repository lives (held for the maintainer) | T12, T13, and through T13: T15, T16, T17, T18, T19, T21 | The maintainer decides OQ7. |
-| Spec change for the breaker unit (Q2) | T18, and T21 | The one-line spec change merges. |
+| The consistent breaker-unit spec revision defined in Q2 (#16) | T18, and T21 | The spec revision in #16 merges. |
+| OQ10, isolated verification context | T2's test transport, T4's test settings, T5, and every task gated by M1 | The spec revision in #16 merges. |
 
-Tasks not blocked: T1 to T6, T8, T9, T11, and T22.
+Tasks not blocked by unresolved decisions: T1 and T3. Other tasks retain their listed dependencies and decision prerequisites.
 
 ### Labels for acceptance rows
 
@@ -1063,11 +1149,22 @@ assertions of D6, "What every kill test asserts".
   - Run-home isolation: the fake harness changes its settings, adds a hook file, and
     edits its copied credential. The host's `~/.claude` and `~/.codex` fixtures and the
     credential source are byte-identical afterwards.
+  - Include an intentionally exposed alias of a protected canary in an otherwise allowed
+    mount. The probe must fail. With the correct layout, the private home must be
+    writable inside the wrapper while the host's harness homes remain unchanged.
+  - Test symlink substitutions at `.git`, `objects`, an object fan-out directory,
+    `refs/heads`, the run-home root, a log directory, and the log itself. The host-side
+    fixture supplies canary targets outside the permitted roots. Extraction must reject
+    each substitution without opening the canary, publishing, or including its bytes in
+    output, diagnostics, records, or questions. Keep the existing leaf-file,
+    special-file, alternates, and hard-link cases. (T1 covers the run-home, log
+    directory, and log cases; T22 covers the clone cases.)
   - Negative cases:
     - a seeded file containing a token prefix fails `harness-config-clean`;
-    - each `wrapper-starts` stage is made to fail on its own (namespaces denied by a
-      fake `bwrap`, a missing bind source, a missing executable). Each is reported with
-      its stage, and `kwoon doctor` exits 1;
+    - after a successful real invocation of all three stages, each `wrapper-starts`
+      stage is made to fail on its own (a required namespace denied, a missing bind
+      source, a missing harness executable). Each is reported with its stage, and
+      `kwoon doctor` exits 1;
     - a harness that outlives its timeout is killed with its whole process tree.
   - Live, run by the operator on the host:
     - `kwoon doctor --harness claude-code` and `--harness codex` start each real harness
@@ -1076,7 +1173,7 @@ assertions of D6, "What every kill test asserts".
     - the output and the probe report are posted on the task issue.
 - **Depends on:** none.
 
-#### T2. GitHub client, credentials, and the two GraphQL mutations (proof 2)
+#### T2. GitHub client, credentials, and the two GraphQL mutations (proof 2) — blocked by #16
 
 - **Builds:**
   - `crates/kwoon-forge`:
@@ -1109,8 +1206,17 @@ assertions of D6, "What every kill test asserts".
     - a request past its deadline gives a typed timeout;
     - an operation routed to a credential that is missing from host settings sends
       nothing;
-    - one fixture per row of "Complete reads" that loads every page but is capped or
-      short of `total_count`: each is reported incomplete.
+    - per row of "Complete reads", positive and negative completeness tests using the
+      evidence that endpoint exposes (D6);
+    - Use distinct synthetic credentials for publication, governed, and policy
+      repositories. For every routed operation, assert the exact credential selected at
+      the HTTP or Git process boundary. A missing route sends nothing; a refused
+      credential causes no fallback. Add operator-run transport proofs of fork push
+      access, policy fetch/checkpoint-branch push access, and Actions reads, alongside
+      the three draft-state proofs.
+    - the isolated verification context's extra TLS roots: a client for a fixture
+      endpoint trusts the test CA; a normal client and a Git subprocess for a
+      non-fixture endpoint do not.
   - Live, run by the operator: `cargo test --test live_github -- --ignored`. It goes
     draft → ready → draft, reading `isDraft` after each step:
     - in the owned test repository, with a fine-grained token;
@@ -1118,9 +1224,15 @@ assertions of D6, "What every kill test asserts".
       classic token routed for upstream;
     - in the outside-collaborator repository, with the classic token.
 
-    The captured, scrubbed responses become the fixtures. A setting where the mutation
-    is refused is reported with the forge's response, and becomes an input to T15.
-- **Depends on:** T1.
+    The captured, scrubbed responses become the fixtures.
+  - M1 requires successful draft → ready → draft transitions in the owned,
+    fork-contribution, and outside-collaborator fixtures, plus the credential-routing
+    proofs assigned to T2. Each credential is tested only for its assigned operations;
+    the policy credential is not required to perform pull-request mutations. A refused
+    required operation leaves M1 unmet and is reported immediately. Later work does not
+    start until the fixture is corrected or the maintainer revises the supported design.
+    A permission limitation is not evidence that Rust should be replaced by Go.
+- **Depends on:** T1; the spec revision in #16, for the test transport.
 
 #### T3. Event store
 
@@ -1146,13 +1258,11 @@ assertions of D6, "What every kill test asserts".
   - Deterministic, `cargo test --test store`, asserting each of these:
     - an edited record is reported with its `seq`;
     - a record missing `policy` is rejected with a non-zero exit code;
-    - **raw writer.** A raw insert may succeed while leaving `head` inconsistent.
-      Verification and the next kwoon write must detect that inconsistency and refuse
-      further authoritative work. A well-formed append that also updates `head` remains
-      the documented authenticity residual. The test makes both kinds of raw write with
-      `sqlite3`. After the first, `kwoon verify` exits non-zero, and the next
-      `kwoon poll` writes nothing and makes no forge call. After the second,
-      `kwoon verify` passes, which the test asserts as the residual;
+    - **raw writer.** The test makes both kinds of raw write with `sqlite3`. After the
+      inconsistent raw insert, `kwoon verify` exits non-zero. T4 additionally proves that
+      the next `kwoon policy accept` appends nothing. T5 proves that the next
+      `kwoon poll` appends nothing and makes no forge call. The well-formed raw append
+      remains accepted as the documented authenticity residual.
     - two `kwoon` writers serialize on the lock;
     - a command that waits more than 120 seconds for the lock exits non-zero and writes
       nothing.
@@ -1168,21 +1278,24 @@ assertions of D6, "What every kill test asserts".
     serialization error, never a silent conversion.
 - **Depends on:** T1.
 
-#### T4. Policy v1, host settings, and init
+#### T4. Policy v1, host settings, and init — blocked by #16
 
 - **Builds:**
   - the policy schema for every option in "Policy v1", as closed Rust types;
   - `kwoon policy accept <commit>`, which reads the file with the git environment of D4,
     runs the floor check, and writes the `policy` record;
-  - host settings loading, including the credential sets, the test flag, and the
-    requested mode;
+  - host settings loading, including the credential sets and the requested mode;
+  - the isolated verification context (D6): its separate state directory with an
+    immutable test classification, its settings and credentials, and its fixture
+    allowlist;
   - `kwoon init <repository> --anchor <commit>`.
 - **Acceptance rows:**
   - G17 [a commit that lowers a floor, or removes a policy-layer path, is refused; a
     merged policy change has no effect until accepted];
   - G8 [a policy that exists only in the store and not in git: `kwoon doctor` refuses
     to start]. T4 adds the check; T9 makes it a capability item.
-- **Check first:** none.
+- **Check first:** the spec revision in #16 has merged, for the isolated verification
+  context.
 - **Verification:**
   - Deterministic, `cargo test --test policy`, with fixture policy repositories. The
     following are refused with a non-zero exit code, and no `policy` record is written:
@@ -1196,9 +1309,14 @@ assertions of D6, "What every kill test asserts".
     - a review count lowered from 2 to 1, which the spec allows ("1 or more");
     - a policy-layer path list that only grew.
   - A merged but unaccepted commit leaves the old policy in effect.
-- **Depends on:** T3.
+  - After T3's inconsistent raw insert, the next `kwoon policy accept` appends nothing
+    and exits non-zero.
+  - Isolated verification context: reopening a test store as normal is refused, and a
+    command naming a repository or endpoint outside the fixture allowlist contacts
+    nothing.
+- **Depends on:** T3; the spec revision in #16, for the isolated verification context.
 
-#### T5. Action journal and pull-request state audit, with the kill test (proof 3)
+#### T5. Action journal and pull-request state audit, with the kill test (proof 3) — blocked by #16
 
 - **Builds:**
   - `kwoon poll` as one pass under the store lock, with its deadline (D1);
@@ -1210,8 +1328,8 @@ assertions of D6, "What every kill test asserts".
     an `unaccounted` audit and a `question`;
   - `kwoon questions`.
 
-  At this point live mode exists only for test repositories, and it comes from host
-  settings. The confirmed switch for other repositories is in T21.
+  The live-mode kill test runs in the isolated verification context, with live mode
+  seeded as already authorized (D6). The mode-switch state machine is built in T21.
 - **Acceptance rows:**
   - G7 [back to draft: killed after the forge accepted, before recording; after restart,
     recorded once, nothing repeated];
@@ -1230,8 +1348,10 @@ assertions of D6, "What every kill test asserts".
   - Negatives:
     - the pull request state cannot be read after the restart: the intent becomes
       `unknown`, a question is raised, and no mutation is sent;
-    - shadow mode: no mutation at all.
-- **Depends on:** T2, T4.
+    - shadow mode: no mutation at all;
+    - after T3's inconsistent raw insert, the next `kwoon poll` appends nothing and
+      makes no forge call.
+- **Depends on:** T2, T4; the spec revision in #16.
 
 #### T6. CI evidence: `check` records and combined results
 
@@ -1306,13 +1426,29 @@ it.
     - a hard link to the canary under `objects/`;
     - `refs/heads/kwoon/work` as a symlink, and as a symbolic ref;
     - a `reftable/` directory;
-    - a corrupt loose object.
+    - a corrupt loose object;
+    - a symlink or special file at `objects/pack/pack-<40 hex>.rev`.
 
     Each is rejected. The canary's bytes appear in no pack, no captured stdout or
     stderr, no record, and no question.
+  - Test symlink substitutions at `.git`, `objects`, an object fan-out directory,
+    `refs/heads`, the run-home root, a log directory, and the log itself. The host-side
+    fixture supplies canary targets outside the permitted roots. Extraction must reject
+    each substitution without opening the canary, publishing, or including its bytes in
+    output, diagnostics, records, or questions. Keep the existing leaf-file,
+    special-file, alternates, and hard-link cases. (T22 covers the clone cases; T1
+    covers the run-home, log directory, and log cases.)
+  - Include a hash-valid, structurally invalid reachable commit, such as one missing its
+    author header. Assert that confined packing succeeds and the production import fails
+    specifically at `index-pack --strict`. In a disposable control repository, the same
+    pack must be accepted by `index-pack` without `--strict`; otherwise the fixture does
+    not prove strict validation. No publishing action may follow the failed production
+    import.
   - Independence: the fake harness overwrites an object file and appends to a pack in
     its clone. The publisher repository's files keep their SHA-256 values.
-  - A clean run's objects are imported, and `git fsck` in the publisher passes.
+  - A clean run created by the specified `--no-local` command is imported successfully,
+    including a fixture large enough to retain a pack and its default `.rev` file. The
+    publisher passes `git fsck`, and the run and publisher share no object inode.
 - **Depends on:** M1, T1, T4.
 
 #### T7. Review runs, verdicts, and findings — blocked by OQ3
@@ -1345,17 +1481,20 @@ it.
     - a verdict that names a finding id kwoon never issued is rejected;
     - a run whose output claims another model has no effect on the observed model;
     - a log without a model field gives `unknown`;
-    - **log rewrite (OQ3).** The author run used session S1 and model M1. A review run
-      is launched with model M1. During the run, a tool call rewrites the harness's log
-      to claim model M2 and session S2. The rewritten identity must not satisfy
-      independence: the `run` record does not record M2 or S2 as launcher-stamped
-      values, and T10's gate does not count this review under `cross-model` or
-      `fresh-session` against S1's run.
+    - **Log rewrite (OQ3).** Use two separate fixtures. For `cross-model`, the author
+      and review both have model M1, while the review log claims M2. For
+      `fresh-session`, the review resumes the author's session S1, or its session
+      identity is unestablished under the approved OQ3 boundary, while the log claims
+      S2. The forged field must not establish the missing independence in either
+      fixture. T10 checks the corresponding gate rejection. Include an untampered,
+      independently established fresh session as a positive control. The maintainer's
+      OQ3 decision determines how identity is established; these tests do not choose
+      that mechanism.
     - **lock scope.** While a review run blocks on a signal from the test, `kwoon poll`
       and `kwoon answer` both complete within 30 seconds.
   - Live, run by the operator: one review run per supported harness on the test
     repository.
-- **Depends on:** M1, T1, T4, T22; the decision on OQ3.
+- **Depends on:** M1, T1, T4, T8, T22; the decision on OQ3.
 
 #### T8. Approvals, answers, questions, and the ruling archive
 
@@ -1383,8 +1522,11 @@ it.
       question is raised;
     - the git kill seam (D6) kills kwoon after `update-ref` moves `kwoon-checkpoints`.
       With the three kill assertions, then after restart one commit and one `archive`;
-    - `core.fsync` changed in kwoon's git configuration: no `archive` record, and a
-      question is raised;
+    - Independently remove reference hardening, remove object hardening, and change
+      `core.fsyncMethod` to `writeout-only` in the effective configuration. Each case
+      must prevent a successful `archive` record and the ruling's effect. Change the
+      configuration at the scope actually consumed by the command; changing an
+      overridden global value is not a negative control.
     - recovery finds a commit whose blob does not match: refused, `unknown`, and a
       question;
     - two commits naming the same source record: `unknown`, and a question;
@@ -1406,7 +1548,8 @@ it.
   - G4 reported as degraded, citing T3's raw-writer test;
   - `released-binary` (D2);
   - `store-consistent` (D1);
-  - the list of test repositories (D6).
+  - whether the process runs in the isolated verification context (D6), and its fixture
+    allowlist.
 - **Acceptance rows:**
   - G3 [a capability whose test did not run is `unknown`, never `verified`];
   - G19 [the only account of the required second family is removed, with no fallback
@@ -1421,8 +1564,10 @@ it.
     time out, and to be skipped. Each gives `unknown` and, for a floor item, exit code 1.
   - The family test uses host settings with one family removed.
   - The root-equivalent test runs with a fake `id` and `sudo -n` on `PATH`.
-  - A governed repository that is not a test repository, with a development build:
-    `released-binary` is `not provided`, and every mode refuses to start for it.
+  - A normal governed repository with a development build: `released-binary` is
+    `not provided`, and every mode refuses to start for it. In the isolated
+    verification context the same build runs, and `released-binary` is still reported
+    `not provided`.
 - **Depends on:** M1, T1, T4.
 
 #### T10. Gate evaluator (shadow) and replay — blocked by OQ3 (through T7)
@@ -1537,9 +1682,11 @@ it.
       pushes them;
     - the edit test changes `seq` 5 in the store, recomputes the chain, and runs
       `kwoon verify`, which reports `seq` 5;
-    - first checkpoint: an empty remote gets a parentless commit from `seq` 1. A remote
-      branch created between the read and the push makes the push fail and records
-      `failed`;
+    - Test both an absent local branch and a local branch containing an archived ruling
+      before the first remote push. The former creates a parentless checkpoint; the
+      latter extends the ruling history. In both cases the remote receives records from
+      `seq` 1. In the latter case the ruling file and archive commit remain reachable. A
+      competing remote branch creation causes failure without overwrite.
     - a remote branch for another store id: nothing pushed, and a question.
   - **Cadence, with a fake clock.** The binary reads the real clock. The test moves time
     by seeding the store with records whose `at` values are set relative to the test's
@@ -1681,7 +1828,7 @@ it.
   of the multi-run fixtures, and replay equality.
 - **Depends on:** M1, T10, T16.
 
-#### T18. Sync circuit breaker — blocked by the Q2 spec change, OQ3, and OQ7
+#### T18. Sync circuit breaker — blocked by #16, OQ3, and OQ7
 
 - **Builds:**
   - the red count of Q2;
@@ -1699,10 +1846,10 @@ it.
     and turns the breaker on]. This applies with "distinct red" meaning a distinct
     target commit, once the spec change merges;
   - Q2 cases 1 to 4.
-- **Check first:** the one-line spec change for Q2 has merged.
+- **Check first:** the consistent breaker-unit spec revision defined in Q2 (#16) has merged.
 - **Verification:** deterministic, `cargo test --test breaker`. A missing completion time
   makes the count `unknown`, and the gate fails at step 3 with a question.
-- **Depends on:** M1, T17; the Q2 spec change.
+- **Depends on:** M1, T17; the consistent breaker-unit spec revision defined in Q2 (#16).
 
 #### T19. Acceptance recovery (G13) — blocked by OQ3 and OQ7
 
@@ -1754,14 +1901,15 @@ it.
     issue.
 - **Depends on:** M1, T7.
 
-#### T21. Live negative suite and readiness for live mode — blocked by OQ3, OQ7, and the Q2 spec change
+#### T21. Live negative suite and readiness for live mode — blocked by OQ3, OQ7, and #16
 
 - **Builds:**
   - `tests/live/`: every row of kind "Live", or "Deterministic and live", run against
-    the dedicated test repository through the release binary;
+    the dedicated test repository through the release binary, in the isolated
+    verification context;
   - `kwoon doctor` floor checks for live mode;
-  - the confirmed switch to live for repositories that are not test repositories (D6,
-    "Mode switch");
+  - the mode-switch state machine (D6, "Mode switch"), including the promotion
+    capability;
   - a report of the shadow promotion criterion.
 - **Acceptance rows:** the live half of G5, G7, G10, PUB-G1a, PUB-G7a to d, and PUB-G5;
   G11; G13. Plus the spec's "Moving from shadow to live" criteria.
@@ -1769,12 +1917,18 @@ it.
 - **Verification:**
   - The operator runs `cargo test --test live -- --ignored` with the release binary and
     posts the result on #4.
-  - The mode-switch test, on a fake-forge repository not marked as a test repository:
-    - a requested switch to live writes a `capability` record and a question, and no
-      handoff happens;
-    - after an `answer` choosing "live", handoffs happen, and every `gate` record names
-      that answer;
-    - a switch back to shadow takes effect on the next pass.
+  - Run the mode-switch scenarios against the fake forge in the isolated verification
+    context, using its scoped test CA and the unchanged production mode-switch state
+    machine.
+  - Test repeated pending polls, withdrawal before answering, expired and superseded
+    questions, a second live request after returning to shadow, insufficient matches,
+    fewer than three passes, repeated evaluations of one pull request, and missing or
+    failed live-negative evidence. None may activate live. One qualified request and its
+    valid answer activate live once; replay reconstructs the same effective mode and
+    authorization.
+  - Negative controls of the isolated verification context (D6): test observations
+    used toward real promotion are refused, and live cannot be activated without a valid
+    confirmation.
   - Switching kwoon's own repository to live mode stays the operator's decision.
 - **Depends on:** M1, T12, T15, T16, T18, T19, T20.
 
@@ -1808,14 +1962,17 @@ it.
 Every acceptance row of both spec tables is assigned to a task above. The live halves are
 also run together in T21.
 
-## Decisions on the open questions (review of `24a470c`)
+## Decisions on the open questions (reviews of `24a470c` and `b673730`)
 
-Decided on #15 on the maintainer's behalf; the maintainer can overturn them at merge.
+Decided on #15 on the maintainer's behalf; the maintainer can overturn them at merge. A
+decision that fills a gap the spec leaves open stands in this plan: Q1, Q3, Q4, OQ5, and
+OQ6. A decision that changes spec text goes through a spec pull request: Q2 and OQ10,
+both carried by #16. Tasks that depend on them stay blocked until #16 merges.
 
 | Item | Decision | Where it is applied |
 |---|---|---|
 | Q1 / OQ2: pending runs | Adopted; the observed run set is persisted | Q1; T6, T17 |
-| Q2 / OQ1: breaker unit | Failed target commits; one-line spec change first | Q2; T18 blocked |
+| Q2 / OQ1: breaker unit | Failed target commits; the consistent breaker-unit spec revision defined in Q2 (#16) first | Q2; T18 blocked |
 | Q3 | Confirmed | Q3; T10 |
 | Q4 | Adopted, with the anchor as the start when nothing passed | Q4; T17 |
 | OQ4: red-fix override | Applies only to a red target | Q3; T10 |
@@ -1823,6 +1980,7 @@ Decided on #15 on the maintainer's behalf; the maintainer can overturn them at m
 | OQ6: one writer | One authoritative writer at a time, with bounded lock scopes | D1; T3, T7 |
 | OQ8: platforms | Linux only | D2 |
 | OQ9: CI platform | T1 must show a runner that works; a denied probe fails | T1 |
+| OQ10: test execution | The `test = true` flag is removed; an isolated verification context replaces it; spec revision in #16 first | D2, D6; T2, T4, T5, T21; blocked tasks |
 
 ## Open questions
 
@@ -1841,11 +1999,6 @@ plan does not change the spec; the maintainer decides each one.
   kwoon's repository is public. Recommendation from the review: a separate private
   repository for the pilot, with its own credential row in D6. Blocks T12 and T13 (see
   "Blocked tasks").
-- **OQ10. Test repositories.** D6 lets a governed repository marked `test = true` use a
-  development build, extra TLS roots, and live mode without a confirming answer. The
-  deterministic and live tests need this. It rests on the operator marking only test
-  repositories. Confirm, or name another way for tests to run the gate without a
-  released binary.
 
 ## Proposed, not in this plan
 

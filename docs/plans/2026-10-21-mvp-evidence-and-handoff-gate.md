@@ -1087,7 +1087,7 @@ If one of them fails, the work stops at that task:
 
 | Blocked by | Tasks | Released when |
 |---|---|---|
-| OQ3, harness log writable by the run (held for the maintainer) | T7, and every task that depends on it: T10, T12, T13, T14, T15, T16, T17, T18, T19, T20, T21 | The maintainer decides OQ3, and this plan or the spec records the decision. |
+| OQ3, harness log writable by the run (decided by #18) | T7, and every task that depends on it: T10, T12, T13, T14, T15, T16, T17, T18, T19, T20, T21 | #18's spec revision merges. |
 | OQ7, where the policy repository lives (held for the maintainer) | T12, T13, and through T13: T15, T16, T17, T18, T19, T21 | The maintainer decides OQ7. |
 | The consistent breaker-unit spec revision defined in Q2 (#16) | T18, and T21 | The spec revision in #16 merges. |
 | OQ10, isolated verification context | T1, and every task that depends on it, directly or through M1 | The spec revision in #16 merges. |
@@ -1469,7 +1469,7 @@ it.
     publisher passes `git fsck`, and the run and publisher share no object inode.
 - **Depends on:** M1, T1, T4.
 
-#### T7. Review runs, verdicts, and findings — blocked by OQ3
+#### T7. Review runs, verdicts, and findings — blocked by #18 (OQ3)
 
 - **Builds:**
   - `kwoon run --role review --pr <n>`: a run clone at the pull request head (T22),
@@ -1478,7 +1478,8 @@ it.
     works, lock again for the result;
   - the `run` record with launcher-stamped identity: harness, session, model and effort
     requested, provider account as an opaque id, family from the policy;
-  - the observed model from the harness's log, as OQ3 is decided;
+  - the observed model as #18 decides: the per-turn models from the harness's log when
+    the launch-time check shows the run cannot write it, otherwise the launch record;
   - kwoon's own capture of the output;
   - a `verdict` record parsed from one final JSON block that kwoon asks for. An output
     that cannot be parsed gives `unknown`;
@@ -1488,7 +1489,8 @@ it.
   `unknown` and never infers a model from the run's output. The gate side of G9 is in
   T10.
 - **Check first:**
-  - The maintainer's decision on OQ3.
+  - The spec revision in #18 has merged.
+  - How each harness reports fallback events [to verify in T7].
   - Still to verify 3, in part: which fields the harness's log reports for the observed
     model and the session id, per harness, and whether kwoon can set the session id at
     launch.
@@ -1510,9 +1512,18 @@ it.
       that mechanism.
     - **lock scope.** While a review run blocks on a signal from the test, `kwoon poll`
       and `kwoon answer` both complete within 30 seconds.
+    - **Model identity (#18).** Each case uses its own fixture:
+      - the session log is writable by the run: identity comes from the launch record,
+        a log claiming another model can only downgrade it to `unknown`, and the `run`
+        record says which evidence applied;
+      - the session log is not writable: the per-turn models from the log are recorded;
+      - one turn is served by a different model, such as a safety fallback: the
+        fallback is recorded and shown in the handoff, and a policy naming the
+        requested model is not satisfied;
+      - the launch-time check cannot be run: the log is treated as writable.
   - Live, run by the operator: one review run per supported harness on the test
     repository.
-- **Depends on:** M1, T1, T4, T8, T22; the decision on OQ3.
+- **Depends on:** M1, T1, T4, T8, T22; the spec revision in #18.
 
 #### T8. Approvals, answers, questions, and the ruling archive
 
@@ -2013,13 +2024,11 @@ both carried by #16. Tasks that depend on them stay blocked until #16 merges.
 These are places where the spec is silent, or where this plan reads or tightens it. The
 plan does not change the spec; the maintainer decides each one.
 
-- **OQ3. The harness log is writable by the run (held for the maintainer).** The spec
-  takes the observed model and the actions from "the harness's own logs". Inside the
-  wrapper, the agent's own tool calls run as the same user as the harness, so they can
-  write that log, and the harness's output stream. The observed model feeds G9. The
-  maintainer decides whether the spec should treat logged identity as a claim, or
-  whether kwoon must capture it outside the run's reach. T7's log-rewrite test must pass
-  either way. Blocks T7 and its dependents (see "Blocked tasks").
+- **OQ3. The harness log is writable by the run (decided by #18).** The log counts only
+  when a launch-time check shows the run cannot write it; otherwise identity falls back
+  to the launch record. The observed model is a per-turn set, and fallbacks are
+  recorded. T7 and its dependents stay blocked until #18's spec revision merges (see
+  "Blocked tasks").
 - **OQ7. Where the policy repository lives (held for the maintainer).** Checkpoints carry
   every record body, including pull request numbers, task names, and opaque account ids.
   kwoon's repository is public. Recommendation from the review: a separate private

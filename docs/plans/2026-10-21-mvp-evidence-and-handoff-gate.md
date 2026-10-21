@@ -1520,7 +1520,12 @@ it.
     - an unparseable verdict gives `unknown`;
     - a verdict that names a finding id kwoon never issued is rejected;
     - a run whose output claims another model has no effect on the observed model;
-    - a log without a model field gives `unknown`;
+    - missing model evidence, separately in `protected-log` and `launch-record` mode: an
+      empty, malformed, or unreadable log makes the run’s observed-model collection
+      `unknown`, never an empty collection; a missing or malformed model field makes that
+      turn’s identity `unknown`. In `protected-log` mode, the requested model never fills
+      a missing identity. T7 asserts the records; T10 asserts the model-requirement
+      failure, gate failure, question, and replay result.
     - **Log rewrite (OQ3).** Use two separate fixtures. For `cross-model`, the author
       and review both have model M1, while the review log claims M2. For
       `fresh-session`, the review resumes the author's session S1, or its session
@@ -1642,8 +1647,25 @@ it.
   - G5 [derived state deleted and rebuilt; every gate decision is the same];
   - G2 [a forge review and comment saying "approved", and a run's output asking to be
     the fix for a red target, change nothing];
-  - G9 [own-session review, unknown model, same-family review on a `cross-family` path
-    are rejected; two verdicts from one run count once];
+  - G9 [an own-session review is rejected; two verdicts from one review run count once];
+  - G9 [a review from a different session with an unknown observed-model collection or any
+    unknown turn is ineligible under each of `fresh-session`, `cross-model`, and
+    `cross-family`. For `cross-model` and `cross-family`, an unknown model or family on
+    either the author or reviewer side fails the rule. Compare every reviewer turn with
+    every turn of every author run: any shared model fails `cross-model`, and any shared
+    family fails `cross-family`; disjoint known sets pass when all other prerequisites
+    hold];
+  - G9, G20 [the gate half of T7’s missing-evidence fixtures, separately in both evidence
+    modes: each fails a model requirement, fails the gate, and raises a question. A model
+    requirement passes only for a nonempty collection whose every turn has a known
+    identity satisfying the requirement. A valid multi-turn log whose first and last turns
+    satisfy the requirement but whose middle turn does not fails; the all-turns-satisfy
+    control passes];
+  - G9, G20 [the gate half of T7’s `launch-record` fixtures: matching reports leave the
+    requested identity standing; mismatches and turn-bound fallback or downgrade events
+    make the affected turn unknown and the review ineligible; unassignable events make the
+    collection unknown. Replay preserves the decisions and the distinction between
+    unverified reports and policy identities].
   - G10 [a new commit after an approval fails until a new review of the new head]: the
     deterministic half; the back-to-draft half is in T15;
   - G12 [shared file F and no target tip: fail; no shared file: pass without sync];
@@ -1655,10 +1677,10 @@ it.
   - Q3 cases 1 to 5.
 - **Check first:** none.
 - **Verification:**
-  - Deterministic, `cargo test --test gate`. One scenario per row above, each run
-    through `kwoon poll` in shadow mode against the fake forge. Each asserts the
-    decision per step, the exit code, and that `kwoon replay` reproduces the record byte
-    for byte with the fake forge stopped.
+  - Deterministic, `cargo test --test gate`. Run each case listed above as a separate
+    scenario through `kwoon poll` in shadow mode against the fake forge. Each asserts the
+    decision per step, the exit code, any required question, and that `kwoon replay`
+    reproduces the record byte for byte with the fake forge stopped.
   - The gate half of T7's log-rewrite test: that review is not counted.
   - The gate half of T7's fallback test: a run with one turn served by a fallback model
     does not satisfy a policy naming the requested model.

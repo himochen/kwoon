@@ -894,9 +894,16 @@ fn the_spy_substitutes_no_report_outside_a_test_context() {
     assert!(text.contains(test_context));
     fs::write(&settings, text.replace(test_context, "kind = \"normal\"")).unwrap();
     let run = Run::from(fixture.command().output().unwrap());
-    assert!(run.stdout.contains("kwoon doctor (normal context)"), "{}", run.stdout);
+    assert!(
+        run.stdout.contains("kwoon doctor (normal context)"),
+        "{}",
+        run.stdout
+    );
     let starts = run.item("wrapper-starts");
-    assert!(starts.starts_with("not provided: stage 2 (filesystem setup)"), "{starts}");
+    assert!(
+        starts.starts_with("not provided: stage 2 (filesystem setup)"),
+        "{starts}"
+    );
     assert!(run.item("harness-starts-in-wrapper").starts_with("unknown"));
     assert_eq!(run.code, 1);
 }

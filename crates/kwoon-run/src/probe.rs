@@ -670,12 +670,36 @@ fn reachable_tcp(tables: &[(&Path, bool)]) -> (Vec<String>, Vec<String>) {
             } else {
                 ([127, 0, 0, 1], port).into()
             };
-            if TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok() {
-                found.insert(addr.to_string());
+            match tcp_outcome(TcpStream::connect_timeout(
+                &addr,
+                Duration::from_millis(200),
+            )) {
+                Ok(true) => {
+                    found.insert(addr.to_string());
+                }
+                Ok(false) => {}
+                Err(err) => errors.push(format!("cannot try {addr}: {err}")),
             }
         }
     }
     (found.into_iter().collect(), errors)
+}
+
+/// Whether a connection attempt to a listening loopback port reached it. As for Unix
+/// sockets, only a refusal means nothing listens there; a listener that answers late or
+/// resets still listens. Any other failure means the port was not tried: an error.
+fn tcp_outcome(result: io::Result<TcpStream>) -> Result<bool, String> {
+    match result {
+        Ok(_) => Ok(true),
+        Err(err) => match err.kind() {
+            io::ErrorKind::ConnectionRefused => Ok(false),
+            io::ErrorKind::TimedOut
+            | io::ErrorKind::WouldBlock
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionAborted => Ok(true),
+            _ => Err(err.to_string()),
+        },
+    }
 }
 
 /// Abstract Unix sockets in the shared network namespace that accept a connection, and
@@ -890,6 +914,18 @@ mod tests {
         let present: BTreeSet<String> = ["HOME", "GITHUB_TOKEN"].map(String::from).into();
         let check = check_environment(&request, &present);
         assert_eq!(check.detail, "forbidden variable GITHUB_TOKEN");
+    }
+
+    #[test]
+    fn a_tcp_port_that_cannot_be_tried_is_an_error_not_unreachable() {
+        // Review R2: connect_timeout(..).is_ok() read every failure as "unreachable".
+        let os = io::Error::from_raw_os_error;
+        assert_eq!(tcp_outcome(Err(os(libc::ECONNREFUSED))), Ok(false));
+        // A listener that does not answer in time still listens there.
+        assert_eq!(tcp_outcome(Err(io::ErrorKind::TimedOut.into())), Ok(true));
+        assert!(tcp_outcome(Err(os(libc::EMFILE))).is_err());
+        assert!(tcp_outcome(Err(os(libc::EADDRNOTAVAIL))).is_err());
+        assert!(tcp_outcome(Err(os(libc::EPERM))).is_err());
     }
 
     #[test]

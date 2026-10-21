@@ -882,6 +882,7 @@ fn passing_report() -> serde_json::Value {
         "reachable_abstract": [],
         "reachable_errors": [],
         "optional_namespaces_created": ["cgroup"],
+        "optional_namespaces_unavailable": [],
     })
 }
 
@@ -916,6 +917,20 @@ fn an_optional_cgroup_namespace_not_created_is_reported() {
     assert_eq!(
         run.item("wrapper-starts"),
         "verified: optional cgroup namespace not created"
+    );
+}
+
+#[test]
+fn an_optional_namespace_the_kernel_lacks_is_reported_unavailable() {
+    // Review R2, finding 4: a kernel without cgroup namespaces is not an error.
+    let mut report = passing_report();
+    report["optional_namespaces_created"] = serde_json::json!([]);
+    report["optional_namespaces_unavailable"] = serde_json::json!(["cgroup"]);
+    let run = doctor_with_report(&report.to_string());
+    run.assert_verified();
+    assert_eq!(
+        run.item("wrapper-starts"),
+        "verified: optional cgroup namespace unavailable on this kernel"
     );
 }
 

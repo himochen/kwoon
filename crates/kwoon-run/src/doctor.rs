@@ -272,19 +272,20 @@ fn finish(
     let wrapper_starts = match stages {
         Stages::AllRan => {
             // Optional isolation is reported as actually created (plan D5).
-            let created = |name: &str| {
-                report.is_some_and(|r| r.optional_namespaces_created.iter().any(|n| n == name))
+            let state = |name: &str| {
+                let listed =
+                    |list: Option<&Vec<String>>| list.is_some_and(|l| l.iter().any(|n| n == name));
+                if listed(report.map(|r| &r.optional_namespaces_created)) {
+                    "created"
+                } else if listed(report.map(|r| &r.optional_namespaces_unavailable)) {
+                    "unavailable on this kernel"
+                } else {
+                    "not created"
+                }
             };
             let detail: Vec<String> = probe::OPTIONAL_NAMESPACES
                 .iter()
-                .map(|name| {
-                    let state = if created(name) {
-                        "created"
-                    } else {
-                        "not created"
-                    };
-                    format!("optional {name} namespace {state}")
-                })
+                .map(|name| format!("optional {name} namespace {}", state(name)))
                 .collect();
             item("wrapper-starts", Status::Verified, detail.join("; "))
         }

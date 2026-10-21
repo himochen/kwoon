@@ -127,15 +127,22 @@ pub const OPTIONAL_NAMESPACES: [&str; 1] = ["cgroup"];
 
 /// The identity of each namespace this process is in, by name.
 pub fn namespace_identities() -> Result<Vec<(String, u64)>, String> {
-    REQUIRED_NAMESPACES
-        .iter()
-        .chain(&OPTIONAL_NAMESPACES)
-        .map(|name| {
-            fs::metadata(format!("/proc/self/ns/{name}"))
-                .map(|meta| (name.to_string(), meta.ino()))
-                .map_err(|err| format!("cannot read the {name} namespace: {err}"))
-        })
-        .collect()
+    namespace_identities_in(Path::new("/proc/self/ns"))
+}
+
+/// A kernel without an optional namespace type has no entry for it: that namespace is
+/// left out, and reported unavailable. A required one missing is an error.
+fn namespace_identities_in(dir: &Path) -> Result<Vec<(String, u64)>, String> {
+    let mut ids = Vec::new();
+    for name in REQUIRED_NAMESPACES.iter().chain(&OPTIONAL_NAMESPACES) {
+        match fs::metadata(dir.join(name)) {
+            Ok(meta) => ids.push((name.to_string(), meta.ino())),
+            Err(err)
+                if err.kind() == io::ErrorKind::NotFound && OPTIONAL_NAMESPACES.contains(name) => {}
+            Err(err) => return Err(format!("cannot read the {name} namespace: {err}")),
+        }
+    }
+    Ok(ids)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,6 +157,8 @@ pub struct Report {
     pub reachable_errors: Vec<String>,
     /// The optional namespaces the wrapper actually created.
     pub optional_namespaces_created: Vec<String>,
+    /// The optional namespaces the kernel does not offer, on the host or inside.
+    pub optional_namespaces_unavailable: Vec<String>,
 }
 
 impl Report {
@@ -183,6 +192,7 @@ pub fn run(request: &Request) -> Report {
         reachable_abstract: Vec::new(),
         reachable_errors: Vec::new(),
         optional_namespaces_created: Vec::new(),
+        optional_namespaces_unavailable: Vec::new(),
     };
     if request.stage == Stage::Namespace {
         return report;
@@ -196,9 +206,10 @@ pub fn run(request: &Request) -> Report {
         check_sockets(request),
         check_environment(request, &variable_names()),
     ];
-    let (namespaces, created) = check_namespaces(request, namespace_identities());
+    let (namespaces, optional) = check_namespaces(request, namespace_identities());
     report.checks.push(namespaces);
-    report.optional_namespaces_created = created;
+    report.optional_namespaces_created = optional.created;
+    report.optional_namespaces_unavailable = optional.unavailable;
     let tables = [
         (Path::new("/proc/net/tcp"), false),
         (Path::new("/proc/net/tcp6"), true),
@@ -619,15 +630,23 @@ fn connect_unix(target: &UnixTarget) -> Result<bool, String> {
     }
 }
 
-/// Namespaces: every required one differs from the host's. Returns the check and the
-/// optional namespaces that were created.
+/// What became of the optional namespaces: created, or unavailable because the
+/// kernel lacks them. The rest exist but were not created.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Optional {
+    created: Vec<String>,
+    unavailable: Vec<String>,
+}
+
+/// Namespaces: every required one differs from the host's. Returns the check and what
+/// became of the optional namespaces.
 fn check_namespaces(
     request: &Request,
     own: Result<Vec<(String, u64)>, String>,
-) -> (Check, Vec<String>) {
+) -> (Check, Optional) {
     let own = match own {
         Ok(own) => own,
-        Err(err) => return (check("namespaces", vec![err]), Vec::new()),
+        Err(err) => return (check("namespaces", vec![err]), Optional::default()),
     };
     let created = |name: &str| -> Result<bool, String> {
         let find = |list: &[(String, u64)]| list.iter().find(|(n, _)| n == name).map(|(_, id)| *id);
@@ -644,10 +663,15 @@ fn check_namespaces(
             Err(err) => problems.push(err),
         }
     }
-    let mut optional = Vec::new();
+    let mut optional = Optional::default();
     for name in OPTIONAL_NAMESPACES {
+        let listed = |list: &[(String, u64)]| list.iter().any(|(n, _)| n == name);
+        if !listed(&own) || !listed(&request.host_namespaces) {
+            optional.unavailable.push(name.to_string());
+            continue;
+        }
         match created(name) {
-            Ok(true) => optional.push(name.to_string()),
+            Ok(true) => optional.created.push(name.to_string()),
             Ok(false) => {}
             Err(err) => problems.push(err),
         }
@@ -858,6 +882,33 @@ mod tests {
     }
 
     #[test]
+    fn a_kernel_without_the_optional_namespace_is_not_an_error() {
+        // Review R2, finding 4: without /proc/self/ns/cgroup, the optional namespace is
+        // unavailable; a missing required one stays an error.
+        let dir = tempfile::tempdir().unwrap();
+        for name in REQUIRED_NAMESPACES {
+            fs::write(dir.path().join(name), "").unwrap();
+        }
+        let ids = namespace_identities_in(dir.path()).unwrap();
+        assert_eq!(
+            ids.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+            REQUIRED_NAMESPACES
+        );
+        // The check then reports the optional namespace unavailable, and passes.
+        let request = Request {
+            host_namespaces: ids.clone(),
+            ..empty_request()
+        };
+        let inside: Vec<(String, u64)> = ids.iter().map(|(n, _)| (n.clone(), 0)).collect();
+        let (check, optional) = check_namespaces(&request, Ok(inside));
+        assert!(check.ok, "{}", check.detail);
+        assert_eq!(optional.unavailable, ["cgroup"]);
+        assert!(optional.created.is_empty());
+        fs::remove_file(dir.path().join("ipc")).unwrap();
+        assert!(namespace_identities_in(dir.path()).is_err());
+    }
+
+    #[test]
     fn a_required_namespace_shared_with_the_host_fails() {
         let names = ["user", "pid", "ipc", "uts", "mnt", "cgroup"];
         let host: Vec<(String, u64)> = names.iter().map(|n| (n.to_string(), 1)).collect();
@@ -867,9 +918,9 @@ mod tests {
         };
         // All new: passes, and the optional cgroup namespace is reported created.
         let all_new: Vec<(String, u64)> = names.iter().map(|n| (n.to_string(), 2)).collect();
-        let (check, created) = check_namespaces(&request, Ok(all_new.clone()));
+        let (check, optional) = check_namespaces(&request, Ok(all_new.clone()));
         assert!(check.ok, "{}", check.detail);
-        assert_eq!(created, ["cgroup"]);
+        assert_eq!(optional.created, ["cgroup"]);
         // The IPC namespace is the host's: fails. The cgroup one too: reported absent.
         let mut shared = all_new;
         for entry in &mut shared {
@@ -877,9 +928,9 @@ mod tests {
                 entry.1 = 1;
             }
         }
-        let (check, created) = check_namespaces(&request, Ok(shared));
+        let (check, optional) = check_namespaces(&request, Ok(shared));
         assert_eq!(check.detail, "the ipc namespace is the host's");
-        assert!(created.is_empty());
+        assert_eq!(optional, Optional::default());
         // No evidence: fails.
         let (check, _) = check_namespaces(&request, Err("unreadable".into()));
         assert!(!check.ok);

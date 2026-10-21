@@ -290,6 +290,21 @@ impl OpenWatch {
     }
 }
 
+/// Host processes of the fake harness itself (its shell), leaving out bubblewrap,
+/// whose own command line names the harness too.
+fn harness_processes(bin: &Path) -> Vec<u32> {
+    let script = format!("{}\0", bin.join("fake-harness").display());
+    processes_mentioning(bin)
+        .into_iter()
+        .filter(|pid| {
+            fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|c| {
+                let c = String::from_utf8_lossy(&c);
+                !c.split('\0').next().unwrap_or("").ends_with("bwrap") && c.contains(&script)
+            })
+        })
+        .collect()
+}
+
 /// Host processes whose command line mentions `needle`.
 fn processes_mentioning(needle: &Path) -> Vec<u32> {
     let needle = needle.display().to_string();
@@ -372,11 +387,11 @@ fn an_exposed_alias_of_a_protected_file_fails_the_files_check() {
     fs::hard_link(&fixture.credential, fixture.bin.join("innocent-name")).unwrap();
     let run = fixture.doctor(&fixture.harness("ok"));
     let hides = run.item("wrapper-hides-state");
-    assert!(
-        hides.starts_with("not provided: files: alias of a protected object at"),
-        "{hides}"
+    let expected = format!(
+        "not provided: files: {} has 2 links, and another one may be reachable",
+        fixture.credential.display()
     );
-    assert!(hides.contains("innocent-name"));
+    assert_eq!(hides, expected);
     // Local runs are refused: the harness is not started.
     assert!(run.item("harness-starts-in-wrapper").starts_with("unknown"));
     assert!(run.item("wrapper-starts").starts_with("unknown"));
@@ -681,7 +696,7 @@ fn the_process_tree_dies_with_kwoon() {
     let mut kwoon = fixture.command().stdout(Stdio::null()).spawn().unwrap();
     // Both fake-harness processes are running inside the wrapper.
     wait_for("the harness to start", Duration::from_secs(20), || {
-        processes_mentioning(&fixture.bin).len() >= 2
+        harness_processes(&fixture.bin).len() >= 2
     });
     kwoon.kill().unwrap();
     kwoon.wait().unwrap();
@@ -717,7 +732,15 @@ fn the_probe_detects_each_exposure_in_a_leaky_sandbox() {
     let meta = fs::metadata(&fixture.credential).unwrap();
     let request = serde_json::json!({
         "stage": "full",
-        "protected": [{"dev": meta.dev(), "ino": meta.ino(), "path": fixture.credential}],
+        "protected": [{
+            "dev": meta.dev(),
+            "ino": meta.ino(),
+            "path": fixture.credential,
+            "links": meta.nlink(),
+            "ancestors": fixture.credential.canonicalize().unwrap().ancestors().skip(1)
+                .map(|dir| { let m = fs::metadata(dir).unwrap(); (m.dev(), m.ino()) })
+                .collect::<Vec<_>>(),
+        }],
         "mounts": [{"mount_point": "/", "access": "any", "optional": false}],
         "env": [],
         "state_dir": fixture.state,
@@ -743,12 +766,16 @@ fn the_probe_detects_each_exposure_in_a_leaky_sandbox() {
             "--dev",
             "/dev",
         ])
-        // The whole fixture, writable: the credential, an alias of it, and the state
-        // directory are all in reach.
+        // The whole fixture, writable, at its own path: the credential, a hard link to
+        // it, and the state directory are in reach. Bound again at another path, it
+        // exposes the credential under a name the probe was not told about.
         .args([
             "--bind",
             &root,
             &root,
+            "--ro-bind",
+            &root,
+            "/exposed",
             "--ro-bind",
             KWOON,
             "/probe",
@@ -770,7 +797,12 @@ fn the_probe_detects_each_exposure_in_a_leaky_sandbox() {
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let files = failed_check(&report, "files");
     assert!(files.contains("is reachable at its own path"), "{files}");
-    assert!(files.contains("alias of a protected object at"), "{files}");
+    assert!(files.contains("has 2 links"), "{files}");
+    let credential = fixture.credential.display();
+    assert!(
+        files.contains(&format!("mount /exposed exposes {credential}")),
+        "{files}"
+    );
     assert!(failed_check(&report, "store-write").contains("created a file in"));
     assert!(failed_check(&report, "mounts").contains("undeclared mount /proc"));
     assert!(failed_check(&report, "descriptors").contains("extra descriptors open: 7"));

@@ -480,17 +480,25 @@ fn expect_success(outcome: &Outcome, deadline: Duration, stderr: Stderr) -> Resu
     }
 }
 
-/// The (device, inode) identity of each path that exists.
+/// The identity, link count, and ancestors of each path that exists.
 pub fn protected_paths(paths: &[PathBuf]) -> Vec<Protected> {
     use std::os::unix::fs::MetadataExt;
+    let identity = |path: &std::path::Path| {
+        std::fs::metadata(path)
+            .ok()
+            .map(|meta| (meta.dev(), meta.ino()))
+    };
     paths
         .iter()
         .filter_map(|path| {
             let meta = std::fs::metadata(path).ok()?;
+            let real = std::fs::canonicalize(path).ok()?;
             Some(Protected {
                 dev: meta.dev(),
                 ino: meta.ino(),
                 path: path.clone(),
+                links: if meta.is_file() { meta.nlink() } else { 0 },
+                ancestors: real.ancestors().skip(1).filter_map(identity).collect(),
             })
         })
         .collect()

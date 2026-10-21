@@ -29,12 +29,17 @@ pub enum Stage {
     Full,
 }
 
-/// An object the run must not reach, by identity and by its host path.
+/// An object the run must not reach, by identity and by its host path, as the host
+/// sees it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Protected {
     pub dev: u64,
     pub ino: u64,
     pub path: PathBuf,
+    /// The link count of a regular file; 0 for a directory.
+    pub links: u64,
+    /// The (device, inode) of each ancestor directory on the host, up to `/`.
+    pub ancestors: Vec<(u64, u64)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -156,71 +161,58 @@ fn unescape(field: &str) -> OsString {
     OsString::from_vec(out)
 }
 
-/// Files: no protected object is reachable, directly by its host path or through any
-/// alias (hard link, bind mount, or symbolic link) in any mounted tree.
+/// Files: no protected object is reachable, directly by its host path or through an
+/// alias in any mounted tree, `/usr` and `/etc` included.
+///
+/// Instead of walking every file of every tree, which does not fit the stage deadline
+/// on hosts with a large `/usr`, the check rests on how an alias can arise:
+/// - a hard link: a regular file has another link only if its link count is above 1,
+///   so such a file fails the check wherever the other link is;
+/// - a bind mount: a mount exposes exactly the subtree under its root, so a protected
+///   object is reachable through a mount only if the mount's root is the object itself
+///   or one of its ancestors; directories cannot be hard-linked;
+/// - a symbolic link: it resolves inside the wrapper, so it reaches only what the two
+///   cases above already make reachable.
 fn check_files(request: &Request, mounts: Option<&Vec<Mount>>) -> Check {
     let mut problems = Vec::new();
-    let protected: HashSet<(u64, u64)> = request.protected.iter().map(|p| (p.dev, p.ino)).collect();
     for item in &request.protected {
         if let Ok(meta) = fs::metadata(&item.path)
-            && protected.contains(&(meta.dev(), meta.ino()))
+            && (meta.dev(), meta.ino()) == (item.dev, item.ino)
         {
             problems.push(format!(
                 "{} is reachable at its own path",
                 item.path.display()
             ));
         }
+        if item.links > 1 {
+            problems.push(format!(
+                "{} has {} links, and another one may be reachable",
+                item.path.display(),
+                item.links
+            ));
+        }
     }
     let Some(mounts) = mounts else {
-        problems.push("mount table unreadable; trees not scanned".into());
+        problems.push("mount table unreadable; mounts not checked".into());
         return check("files", problems);
     };
-    let points: HashSet<&Path> = mounts.iter().map(|m| m.point.as_path()).collect();
-    for mount in mounts {
-        if mount.point.starts_with("/proc") {
+    for mount in mounts.iter().filter(|m| !m.point.starts_with("/proc")) {
+        let Ok(meta) = fs::metadata(&mount.point) else {
+            problems.push(format!("cannot inspect mount {}", mount.point.display()));
             continue;
+        };
+        let root = (meta.dev(), meta.ino());
+        for item in &request.protected {
+            if root == (item.dev, item.ino) || item.ancestors.contains(&root) {
+                problems.push(format!(
+                    "mount {} exposes {}",
+                    mount.point.display(),
+                    item.path.display()
+                ));
+            }
         }
-        scan_tree(&mount.point, &points, &protected, &mut problems);
     }
     check("files", problems)
-}
-
-fn scan_tree(
-    root: &Path,
-    points: &HashSet<&Path>,
-    protected: &HashSet<(u64, u64)>,
-    problems: &mut Vec<String>,
-) {
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(path) = stack.pop() {
-        let Ok(meta) = fs::symlink_metadata(&path) else {
-            continue;
-        };
-        if protected.contains(&(meta.dev(), meta.ino())) {
-            problems.push(format!("alias of a protected object at {}", path.display()));
-        }
-        if meta.file_type().is_symlink() {
-            if let Ok(target) = fs::metadata(&path)
-                && protected.contains(&(target.dev(), target.ino()))
-            {
-                problems.push(format!("link to a protected object at {}", path.display()));
-            }
-            continue;
-        }
-        if !meta.is_dir() {
-            continue;
-        }
-        let Ok(entries) = fs::read_dir(&path) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let child = entry.path();
-            // Nested mounts are scanned as their own roots.
-            if !points.contains(child.as_path()) {
-                stack.push(child);
-            }
-        }
-    }
 }
 
 /// G4: creating a file in the state directory fails.

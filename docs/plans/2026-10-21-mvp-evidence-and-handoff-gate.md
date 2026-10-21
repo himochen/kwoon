@@ -1841,8 +1841,13 @@ it.
 #### T15. Live handoff and re-evaluation — blocked by OQ3
 
 - **Builds:**
-  - for a passing gate: the `gate` record, the intent, mark ready, request reviewers,
-    the optional handoff comment, and the `handoff` record;
+  - for a passing gate: the `gate` record, the intent, mark ready, request reviewers, one
+    mandatory handoff comment, and the `handoff` record. For every author and review run
+    used by the gate, the comment shows the requested model, observed models and families,
+    every reported fallback or downgrade, and the evidence mode. Reports from
+    `launch-record` mode are labeled unverified and distinguished from the identities used
+    by the gate. Policy controls only whether the same comment also includes checks and
+    approvals;
   - re-evaluation of handed-off pull requests on every pass, and back to draft on
     failure, except for step 8;
   - the per-reviewer intents and the history-based recovery of "External actions";
@@ -1851,6 +1856,12 @@ it.
 - **Acceptance rows:**
   - G7 [mark ready; request reviewers, including every reviewer-request case in the G7
     row; post the handoff comment];
+  - G9 [handoff disclosure]: with the policy’s full gate summary disabled, a passing
+    handoff still posts the comment with all required model disclosures for both author
+    and review runs. Run this deterministic fixture through the production entry point
+    with a `protected-log` review and a `launch-record` author; assert that the author’s
+    reported data is labeled unverified and kept separate from policy identities, together
+    with the gate result, exit code, and posted comment;
   - G10 [a handed-off pull request goes back to draft after a new commit], deterministic
     and live;
   - G19 [a capability lapses between evaluation and handoff: the handoff is refused].

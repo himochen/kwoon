@@ -1,0 +1,5 @@
+# Every build, test binary included, is a static musl executable: the doctor's
+# namespace stage runs the kwoon binary under test as its probe inside an otherwise
+# empty filesystem (plan D5), where a dynamically linked binary cannot start.
+[build]
+target = "x86_64-unknown-linux-musl"

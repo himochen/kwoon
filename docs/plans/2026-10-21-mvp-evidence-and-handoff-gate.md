@@ -1685,9 +1685,9 @@ it.
   - The gate half of T7’s fallback test, with the protection check passed: a fallback turn
     fails a requirement naming only the requested model. Separately, under `cross-family`,
     the sole review falls back to an author’s family: the review is rejected and the gate
-    fails. In a passing control, the original and fallback models’ families are absent
-    from every author run and all other prerequisites pass. Assert each gate result, exit
-    code, and replay result. T15 owns the corresponding handoff-action assertions.
+    fails. In a passing control under the same effective `cross-family` rule, the
+    original and fallback models’ families are absent from every author run and all other
+    prerequisites pass. Assert each gate result, exit code, and replay result. T15 owns the corresponding handoff-action assertions.
   - The rebuild test deletes `derived.db` between two passes and compares every
     decision.
 - **Depends on:** M1, T6, T7, T8, T9.
@@ -1885,9 +1885,10 @@ it.
     all other gate prerequisites satisfied. In the rejection fixture, the sole review
     falls back to an author’s family under `cross-family`: the gate fails, the `run`
     record retains the fallback, and no handoff action occurs. In the passing fixture,
-    policy permits every observed model and both review-model families are absent from
-    every author run: the gate passes, handoff occurs, and the comment shows the requested
-    model, both observed models and their families, the fallback, and the evidence mode.
+    the effective independence rule is also `cross-family`, policy permits every observed
+    model, and both review-model families are absent from every author run: the gate
+    passes, handoff occurs, and the comment shows the requested model, both observed
+    models and their families, the fallback, and the evidence mode.
     Assert the gate result, exit code, and absence or presence of handoff actions
     separately.
 - **Depends on:** M1, T10, T13, T14.
@@ -2060,13 +2061,13 @@ it.
 |---|---|---|
 | G1 | Degradable; provided for runs kwoon starts | T1, T14, T22 |
 | G2 | Floor | T9, T10, T14, T22 |
-| G3 | Floor | T9, T11 |
+| G3 | Floor | T7, T9, T11 |
 | G4 | Degraded | T1, T3, T9 |
 | G5 | Floor | T3, T5, T10, T12, T14, T16 |
 | G6 | Degraded to the last pushed checkpoint | T3, T13 |
 | G7 | Floor | T2, T5, T13, T14, T15, T19 |
 | G8 | Floor | T4, T8, T9, T10, T13 |
-| G9 | Degradable along the fallback chain | T7, T10, T20 |
+| G9 | Degradable along the fallback chain | T7, T10, T15, T20 |
 | G10 | Floor (never carried over) | T10, T15 |
 | G11 | Degraded (kwoon does not merge) | T15, T16 |
 | G12 | Tunable | T10, T18 |
@@ -2077,7 +2078,7 @@ it.
 | G17 | Floor | T4 |
 | G18 | Floor | T3 |
 | G19 | Floor | T9, T14, T15 |
-| G20 | Floor | T6, T10, T17, T22 |
+| G20 | Floor | T6, T7, T10, T17, T22 |
 | G21 | Tunable | T5, T8 |
 | G22 | Not provided in the MVP, as the spec states | T9 reports it `not provided` |
 

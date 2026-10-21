@@ -58,7 +58,7 @@ fn usage() -> ExitCode {
     ExitCode::from(2)
 }
 
-/// `kwoon __probe <request>`: runs inside the wrapper only.
+/// `kwoon __probe <request file>`: runs inside the wrapper only.
 fn probe(args: &[String]) -> ExitCode {
     let [request] = args else {
         return usage();
@@ -113,7 +113,7 @@ fn doctor(config_dir: Option<PathBuf>, only: Option<&String>) -> Result<bool, St
             .map_err(|err| format!("cannot find the kwoon executable: {err}"))?,
         runs_dir: settings.paths.runs_dir.clone(),
         state_dir: settings.paths.state_dir.clone(),
-        protected: doctor::protected_paths(&protected),
+        protected: doctor::protected_paths(&protected)?,
         forge_secrets,
         ssh_auth_sock: env::var("SSH_AUTH_SOCK").ok(),
         dbus_address: env::var("DBUS_SESSION_BUS_ADDRESS").ok(),

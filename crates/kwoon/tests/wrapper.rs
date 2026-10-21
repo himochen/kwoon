@@ -436,6 +436,42 @@ fn a_bound_protected_directory_fails_the_files_check() {
     assert_eq!(run.code, 1);
 }
 
+/// Asserts that the files check refused the layout, so the harness never started.
+fn assert_refused_before_the_harness(run: &Run, expected: &str) {
+    let hides = run.item("wrapper-hides-state");
+    assert!(
+        hides.starts_with("not provided: files: ") && hides.contains(expected),
+        "{hides}"
+    );
+    assert!(run.item("harness-starts-in-wrapper").starts_with("unknown"));
+    assert!(run.item("wrapper-starts").starts_with("unknown"));
+    assert_eq!(run.code, 1);
+    run.assert_no_secret();
+}
+
+#[test]
+fn a_hard_link_to_a_file_inside_a_protected_directory_is_refused() {
+    // Review R1, finding 1: only the directory ~/.config/gh is named as protected.
+    let fixture = Fixture::new();
+    let hosts = fixture.home.join(".config/gh/hosts.yml");
+    fs::hard_link(&hosts, fixture.bin.join("innocent-name")).unwrap();
+    let run = fixture.doctor(&fixture.harness("ok"));
+    let expected = format!("{} has 2 links", hosts.display());
+    assert_refused_before_the_harness(&run, &expected);
+}
+
+#[test]
+fn a_bound_file_inside_a_protected_directory_is_refused() {
+    // Review R1, finding 1: a bind of one file under ~/.config/gh, at its own path.
+    let fixture = Fixture::new();
+    let hosts = fixture.home.join(".config/gh/hosts.yml");
+    let mut harness = fixture.harness("ok");
+    harness.ro_binds.push(hosts.clone());
+    let run = fixture.doctor(&harness);
+    let expected = format!("mount {0} exposes {0}", hosts.display());
+    assert_refused_before_the_harness(&run, &expected);
+}
+
 #[test]
 fn an_inherited_descriptor_does_not_reach_the_wrapper() {
     let fixture = Fixture::new();
@@ -796,6 +832,9 @@ fn the_probe_detects_each_exposure_in_a_leaky_sandbox() {
         "ssh_auth_sock": null,
         "dbus_address": null,
     });
+    // The fixture root is bound at its own path below, so the probe reads this file there.
+    let request_file = fixture.root.join("request.json");
+    fs::write(&request_file, request.to_string()).unwrap();
     let root = fixture.root.display().to_string();
     let mut command = Command::new("bwrap");
     command
@@ -831,7 +870,7 @@ fn the_probe_detects_each_exposure_in_a_leaky_sandbox() {
             "/probe",
             "__probe",
         ])
-        .arg(request.to_string())
+        .arg(&request_file)
         .env_clear()
         .stdin(Stdio::null());
     // An inherited descriptor, which bubblewrap passes on unless it is close-on-exec.

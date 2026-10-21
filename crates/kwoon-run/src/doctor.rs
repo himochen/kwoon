@@ -3,14 +3,14 @@
 
 use std::ffi::OsString;
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::builder::Sandbox;
 use crate::contain;
 use crate::harness::Kind;
 use crate::home::{self, RunDir, SeedFile};
-use crate::probe::{self, PROBE_PATH, Protected, Report, Request, Stage};
+use crate::probe::{self, PROBE_PATH, PROBE_REQUEST_PATH, Protected, Report, Request, Stage};
 use crate::spawn::{self, Ending, Outcome};
 
 /// Each bubblewrap setup stage has this deadline (plan D6, "Deadlines").
@@ -127,9 +127,8 @@ fn check_in(host: &Host, harness: &Harness, run: &RunDir) -> Vec<Item> {
 
     // Stage 1: the namespace and process options, with only the probe in an otherwise
     // empty filesystem.
-    let stage1 = Sandbox::new(&host.bwrap)
-        .share_net()
-        .ro_bind(&host.probe, PROBE_PATH);
+    let request_file = run.root.join("probe-request-1.json");
+    let stage1 = probe_sandbox(Sandbox::new(&host.bwrap).share_net(), host, &request_file);
     let request = Request {
         stage: Stage::Namespace,
         protected: Vec::new(),
@@ -139,7 +138,8 @@ fn check_in(host: &Host, harness: &Harness, run: &RunDir) -> Vec<Item> {
         ssh_auth_sock: None,
         dbus_address: None,
     };
-    if let Err(why) = run_probe(&stage1, &request).and_then(|report| expect_pid_namespace(&report))
+    if let Err(why) =
+        run_probe(&stage1, &request, &request_file).and_then(|report| expect_pid_namespace(&report))
     {
         // Namespace-creation failures are reported apart from probe-execution failures.
         let why = if why.starts_with("namespace creation failed")
@@ -162,7 +162,8 @@ fn check_in(host: &Host, harness: &Harness, run: &RunDir) -> Vec<Item> {
 
     // Stage 2: the probe with the complete production layout.
     let layout = run_layout(host, harness, run, &env);
-    let stage2 = layout.clone().ro_bind(&host.probe, PROBE_PATH);
+    let request_file = run.root.join("probe-request-2.json");
+    let stage2 = probe_sandbox(layout.clone(), host, &request_file);
     let request = Request {
         stage: Stage::Full,
         protected: host.protected.clone(),
@@ -172,14 +173,15 @@ fn check_in(host: &Host, harness: &Harness, run: &RunDir) -> Vec<Item> {
         ssh_auth_sock: host.ssh_auth_sock.clone(),
         dbus_address: host.dbus_address.clone(),
     };
-    let report =
-        match run_probe(&stage2, &request).and_then(|r| expect_pid_namespace(&r).map(|_| r)) {
-            Ok(report) => report,
-            Err(why) => {
-                let why = format!("stage 2 (filesystem setup): {why}");
-                return finish(Stages::Failed(why), None, config_clean, None);
-            }
-        };
+    let report = match run_probe(&stage2, &request, &request_file)
+        .and_then(|r| expect_pid_namespace(&r).map(|_| r))
+    {
+        Ok(report) => report,
+        Err(why) => {
+            let why = format!("stage 2 (filesystem setup): {why}");
+            return finish(Stages::Failed(why), None, config_clean, None);
+        }
+    };
 
     // Stage 3: the harness itself, only when nothing it could leak is in reach.
     if !report.all_ok() {
@@ -394,10 +396,20 @@ fn run_layout(host: &Host, harness: &Harness, run: &RunDir, env: &[(String, Stri
         .chdir(&run.clone)
 }
 
-fn run_probe(sandbox: &Sandbox, request: &Request) -> Result<Report, String> {
-    let json = serde_json::to_string(request)
+/// Runs the probe in `sandbox`. The request goes in a file bound read-only beside the
+/// probe: it lists every protected object, which can exceed what one argument holds.
+/// `sandbox` must already bind `request_file` there ([`probe_sandbox`]), so that the
+/// bind is among its declared mounts.
+fn run_probe(sandbox: &Sandbox, request: &Request, request_file: &Path) -> Result<Report, String> {
+    let json = serde_json::to_vec(request)
         .map_err(|err| format!("cannot encode the probe request: {err}"))?;
-    let command: Vec<OsString> = vec![PROBE_PATH.into(), "__probe".into(), json.into()];
+    write_private(request_file, &json)
+        .map_err(|err| format!("cannot write the probe request: {err}"))?;
+    let command: Vec<OsString> = vec![
+        PROBE_PATH.into(),
+        "__probe".into(),
+        PROBE_REQUEST_PATH.into(),
+    ];
     let outcome = spawn::run(&sandbox.argv(&command), STAGE_DEADLINE)
         .map_err(|err| format!("cannot start bubblewrap: {err}"))?;
     expect_success(&outcome, STAGE_DEADLINE, Stderr::Trusted)?;
@@ -410,6 +422,24 @@ fn run_probe(sandbox: &Sandbox, request: &Request) -> Result<Report, String> {
                 Err("probe execution failed: report for another stage".into())
             }
         })
+}
+
+/// `sandbox` with the probe and its request file bound read-only.
+fn probe_sandbox(sandbox: Sandbox, host: &Host, request_file: &Path) -> Sandbox {
+    sandbox
+        .ro_bind(&host.probe, PROBE_PATH)
+        .ro_bind(request_file, PROBE_REQUEST_PATH)
+}
+
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?
+        .write_all(bytes)
 }
 
 /// With `--unshare-pid`, bubblewrap's init is pid 1 and its child pid 2.
@@ -479,33 +509,77 @@ fn expect_success(outcome: &Outcome, deadline: Duration, stderr: Stderr) -> Resu
     }
 }
 
-/// The identity, link count, and ancestors of each path that exists.
-pub fn protected_paths(paths: &[PathBuf]) -> Vec<Protected> {
+/// The protected objects: each path that exists, with its link count and ancestors,
+/// and, for a directory, everything under it. A file under a protected directory is as
+/// secret as the directory, so it is checked by its own identity and link count too.
+/// Symbolic links are not followed: what they point to is not under the directory.
+pub fn protected_paths(paths: &[PathBuf]) -> Result<Vec<Protected>, String> {
     use std::os::unix::fs::MetadataExt;
     let identity = |path: &std::path::Path| {
         std::fs::metadata(path)
             .ok()
             .map(|meta| (meta.dev(), meta.ino()))
     };
-    paths
-        .iter()
-        .filter_map(|path| {
-            let meta = std::fs::metadata(path).ok()?;
-            let real = std::fs::canonicalize(path).ok()?;
-            Some(Protected {
-                dev: meta.dev(),
-                ino: meta.ino(),
-                path: path.clone(),
-                links: if meta.is_file() { meta.nlink() } else { 0 },
-                ancestors: real.ancestors().skip(1).filter_map(identity).collect(),
-            })
-        })
-        .collect()
+    let entry = |path: PathBuf, meta: &std::fs::Metadata, ancestors| Protected {
+        dev: meta.dev(),
+        ino: meta.ino(),
+        links: if meta.is_dir() { 0 } else { meta.nlink() },
+        path,
+        ancestors,
+    };
+    let mut protected: Vec<Protected> = Vec::new();
+    // A credential file is often also under the configuration directory: list it once.
+    let mut push = |item: Protected| {
+        if !protected
+            .iter()
+            .any(|p| (p.dev, p.ino) == (item.dev, item.ino))
+        {
+            protected.push(item);
+        }
+    };
+    for path in paths {
+        let Ok(meta) = std::fs::metadata(path) else {
+            continue;
+        };
+        let real = std::fs::canonicalize(path)
+            .map_err(|err| format!("cannot resolve {}: {err}", path.display()))?;
+        let ancestors = real.ancestors().skip(1).filter_map(identity).collect();
+        push(entry(path.clone(), &meta, ancestors));
+        if !meta.is_dir() {
+            continue;
+        }
+        // Everything under it, so that a hard link to, or a bind of, any of it is seen.
+        let mut stack = vec![real];
+        while let Some(dir) = stack.pop() {
+            let entries = std::fs::read_dir(&dir).map_err(|err| {
+                format!("cannot list protected directory {}: {err}", dir.display())
+            })?;
+            for child in entries {
+                let child = child
+                    .map_err(|err| {
+                        format!("cannot list protected directory {}: {err}", dir.display())
+                    })?
+                    .path();
+                let meta = std::fs::symlink_metadata(&child)
+                    .map_err(|err| format!("cannot inspect {}: {err}", child.display()))?;
+                if meta.file_type().is_symlink() {
+                    continue;
+                }
+                if meta.is_dir() {
+                    stack.push(child.clone());
+                }
+                push(entry(child, &meta, Vec::new()));
+            }
+        }
+    }
+    Ok(protected)
 }
 
-/// For `kwoon __probe`: decode the request, run it, and encode the report.
-pub fn probe_main(request_json: &str) -> Result<String, String> {
+/// For `kwoon __probe <request file>`: read the request, run it, and encode the report.
+pub fn probe_main(request_file: &str) -> Result<String, String> {
+    let json = std::fs::read(request_file)
+        .map_err(|err| format!("cannot read the probe request: {err}"))?;
     let request: Request =
-        serde_json::from_str(request_json).map_err(|err| format!("bad probe request: {err}"))?;
+        serde_json::from_slice(&json).map_err(|err| format!("bad probe request: {err}"))?;
     serde_json::to_string(&probe::run(&request)).map_err(|err| err.to_string())
 }

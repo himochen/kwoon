@@ -19,6 +19,8 @@ use crate::builder::{Access, DeclaredMount};
 
 /// Where the probe executable is bound inside the sandbox.
 pub const PROBE_PATH: &str = "/.kwoon-probe";
+/// Where the probe's request file is bound inside the sandbox.
+pub const PROBE_REQUEST_PATH: &str = "/.kwoon-probe-request";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -36,9 +38,11 @@ pub struct Protected {
     pub dev: u64,
     pub ino: u64,
     pub path: PathBuf,
-    /// The link count of a regular file; 0 for a directory.
+    /// The link count of a file; 0 for a directory.
     pub links: u64,
-    /// The (device, inode) of each ancestor directory on the host, up to `/`.
+    /// The (device, inode) of each ancestor directory on the host, up to `/`. Empty for
+    /// an object under a protected directory, whose ancestors are covered by that
+    /// directory's own entry.
     pub ancestors: Vec<(u64, u64)>,
 }
 
@@ -165,9 +169,11 @@ fn unescape(field: &str) -> OsString {
 /// alias in any mounted tree, `/usr` and `/etc` included.
 ///
 /// Instead of walking every file of every tree, which does not fit the stage deadline
-/// on hosts with a large `/usr`, the check rests on how an alias can arise:
-/// - a hard link: a regular file has another link only if its link count is above 1,
-///   so such a file fails the check wherever the other link is;
+/// on hosts with a large `/usr`, the check rests on how an alias can arise. The host
+/// lists every protected object, including everything under a protected directory
+/// (`doctor::protected_paths`), so these cases cover all of them:
+/// - a hard link: a file has another link only if its link count is above 1, so such a
+///   file fails the check wherever the other link is;
 /// - a bind mount: a mount exposes exactly the subtree under its root, so a protected
 ///   object is reachable through a mount only if the mount's root is the object itself
 ///   or one of its ancestors; directories cannot be hard-linked;

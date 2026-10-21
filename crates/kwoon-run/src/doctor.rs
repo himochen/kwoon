@@ -578,13 +578,23 @@ pub fn protected_paths(paths: &[PathBuf]) -> Result<Vec<Protected>, String> {
         ancestors,
     };
     let mut protected: Vec<Protected> = Vec::new();
-    // A credential file is often also under the configuration directory: list it once.
+    // A credential file is often also under the configuration directory, so the same
+    // path can be met twice: merge those, keeping every ancestor either visit found. The
+    // same object under another path (a bind mount, say) stays a separate entry, since
+    // each path needs its own direct-access check and keeps its own ancestors.
     let mut push = |item: Protected| {
-        if !protected
-            .iter()
-            .any(|p| (p.dev, p.ino) == (item.dev, item.ino))
-        {
-            protected.push(item);
+        let same = protected
+            .iter_mut()
+            .find(|p| (p.dev, p.ino) == (item.dev, item.ino) && p.path == item.path);
+        match same {
+            Some(existing) => {
+                for ancestor in item.ancestors {
+                    if !existing.ancestors.contains(&ancestor) {
+                        existing.ancestors.push(ancestor);
+                    }
+                }
+            }
+            None => protected.push(item),
         }
     };
     for path in paths {

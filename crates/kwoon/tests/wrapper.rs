@@ -473,6 +473,47 @@ fn a_bound_file_inside_a_protected_directory_is_refused() {
 }
 
 #[test]
+fn a_bind_alias_listed_first_does_not_hide_the_registered_credential() {
+    // Review R2, finding 1. The forge credential lives outside the configuration
+    // directory, which holds a bind-mounted alias of it: same inode, one link. The
+    // directory is listed before the credential, so the alias is met first. Binding the
+    // credential's own directory must still be refused.
+    let mut fixture = Fixture::new();
+    let secrets = fixture.root.join("secrets");
+    fs::create_dir(&secrets).unwrap();
+    fixture.credential = secrets.join("fixture.token");
+    fs::write(&fixture.credential, format!("{FORGE_TOKEN}\n")).unwrap();
+    let alias = fixture.config.join("alias");
+    fs::write(&alias, "").unwrap();
+    fs::remove_file(fixture.config.join("fixture.token")).unwrap();
+    let mut harness = fixture.harness("ok");
+    harness.ro_binds.push(secrets.clone());
+    fixture.write_settings(&harness);
+    // An unprivileged mount namespace, so the bind needs no root on the host.
+    let mut command = Command::new("unshare");
+    command.args(["--user", "--map-root-user", "--mount", "sh", "-c"]);
+    command.arg(format!(
+        "mount --bind {} {} && exec \"$0\" \"$@\"",
+        fixture.credential.display(),
+        alias.display()
+    ));
+    command.arg(KWOON);
+    fixture.prepare(&mut command);
+    let run = Run::from(command.output().unwrap());
+    let expected = format!(
+        "{} is reachable at its own path",
+        fixture.credential.display()
+    );
+    assert_refused_before_the_harness(&run, &expected);
+    let expected = format!(
+        "mount {} exposes {}",
+        secrets.display(),
+        fixture.credential.display()
+    );
+    assert!(run.item("wrapper-hides-state").contains(&expected));
+}
+
+#[test]
 fn binding_the_operators_claude_home_is_refused() {
     // Review R1, finding 2; plan D5: the operator's ~/.claude is never bound.
     let fixture = Fixture::new();

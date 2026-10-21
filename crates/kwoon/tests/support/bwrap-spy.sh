@@ -3,10 +3,11 @@
 # settings name it as `paths.bwrap`, so kwoon reaches it through its production code.
 #
 # It appends each invocation's arguments and environment to `log` next to it, then
-# runs the real bubblewrap, logging the arguments it runs it with. kwoon starts it with an empty environment, so the
-# behaviour comes from the file `mode` next to it:
+# runs the real bubblewrap, logging the arguments it runs it with. kwoon starts it
+# with an empty environment, so the behaviour comes from the file `mode` next to it:
 #   (absent)            run bubblewrap unchanged
 #   report <file>       for the full-layout probe (stage 2), print <file> instead
+#                       (only in a test context, as for `writable`)
 #   no-cgroup           do not ask for a cgroup namespace
 #   writable <dir>      for stage 2, bind <dir> writable instead of read-only, and edit
 #                       the probe request so that it declares the bind writable too
@@ -38,6 +39,29 @@ case " $* " in
     esac
     ;;
 esac
+
+# The modes that change stage 2's evidence refuse unless kwoon runs in an isolated
+# verification context: the state directory named in the probe request is classified
+# "test". A normal context that names this script as its bubblewrap gets no
+# substituted evidence.
+in_test_context() {
+    request=""
+    previous=""
+    for arg do
+        if [ "$arg" = /.kwoon-probe-request ] && [ -z "$request" ]; then request="$previous"; fi
+        previous="$arg"
+    done
+    [ -n "$request" ] || return 1
+    state=$(/usr/bin/sed -n 's/.*"state_dir":"\([^"]*\)".*/\1/p' "$request")
+    [ -n "$state" ] && [ "$(/usr/bin/cat "$state/classification" 2>/dev/null)" = test ]
+}
+
+if [ "$stage" = 2 ] && { [ "$mode" = report ] || [ "$mode" = writable ]; }; then
+    if ! in_test_context "$@"; then
+        echo "bwrap-spy: refusing to change stage 2 outside a test context" >&2
+        exit 1
+    fi
+fi
 
 case "$mode" in
 report)

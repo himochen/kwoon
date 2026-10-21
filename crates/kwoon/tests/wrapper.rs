@@ -880,6 +880,28 @@ fn the_canned_passing_report_is_accepted() {
 }
 
 #[test]
+fn the_spy_substitutes_no_report_outside_a_test_context() {
+    // Review R2, finding 2: a normal context naming the spy as its bubblewrap gets no
+    // canned report, so the harness never starts on evidence the probe did not give.
+    let fixture = Fixture::new();
+    let file = fixture.root.join("canned-report.json");
+    fs::write(&file, passing_report().to_string()).unwrap();
+    fixture.spy(&format!("report {}", file.display()));
+    fixture.write_settings(&fixture.harness("ok"));
+    let settings = fixture.config.join("settings.toml");
+    let text = fs::read_to_string(&settings).unwrap();
+    let test_context = "kind = \"test\"\nfixture_repositories = [\"kwoon-fixtures/sandbox\"]\nfixture_endpoints = [\"https://api.github.com\"]";
+    assert!(text.contains(test_context));
+    fs::write(&settings, text.replace(test_context, "kind = \"normal\"")).unwrap();
+    let run = Run::from(fixture.command().output().unwrap());
+    assert!(run.stdout.contains("kwoon doctor (normal context)"), "{}", run.stdout);
+    let starts = run.item("wrapper-starts");
+    assert!(starts.starts_with("not provided: stage 2 (filesystem setup)"), "{starts}");
+    assert!(run.item("harness-starts-in-wrapper").starts_with("unknown"));
+    assert_eq!(run.code, 1);
+}
+
+#[test]
 fn a_probe_report_without_checks_is_not_verified() {
     // Review R1, finding 4: an empty check list is no evidence.
     let mut report = passing_report();

@@ -1682,8 +1682,12 @@ it.
     decision per step, the exit code, any required question, and that `kwoon replay`
     reproduces the record byte for byte with the fake forge stopped.
   - The gate half of T7's log-rewrite test: that review is not counted.
-  - The gate half of T7's fallback test: a run with one turn served by a fallback model
-    does not satisfy a policy naming the requested model.
+  - The gate half of T7’s fallback test, with the protection check passed: a fallback turn
+    fails a requirement naming only the requested model. Separately, under `cross-family`,
+    the sole review falls back to an author’s family: the review is rejected and the gate
+    fails. In a passing control, the original and fallback models’ families are absent
+    from every author run and all other prerequisites pass. Assert each gate result, exit
+    code, and replay result. T15 owns the corresponding handoff-action assertions.
   - The rebuild test deletes `derived.db` between two passes and compares every
     decision.
 - **Depends on:** M1, T6, T7, T8, T9.
@@ -1865,8 +1869,16 @@ it.
     - a capped history where every page loads;
     - a crash after a per-reviewer intent but before submission.
   - Live: the same on the test repository, through the live kill seam.
-  - The handoff half of T7's fallback test: with a separate fixture whose policy permits
-    every observed model, the handoff happens and shows the fallback.
+  - The handoff half of T7’s fallback test: run two separate fixtures through `kwoon poll`
+    in an isolated context authorized for live mode, with the protection check passed and
+    all other gate prerequisites satisfied. In the rejection fixture, the sole review
+    falls back to an author’s family under `cross-family`: the gate fails, the `run`
+    record retains the fallback, and no handoff action occurs. In the passing fixture,
+    policy permits every observed model and both review-model families are absent from
+    every author run: the gate passes, handoff occurs, and the comment shows the requested
+    model, both observed models and their families, the fallback, and the evidence mode.
+    Assert the gate result, exit code, and absence or presence of handoff actions
+    separately.
 - **Depends on:** M1, T10, T13, T14.
 
 #### T16. Handoff audit — blocked by OQ3

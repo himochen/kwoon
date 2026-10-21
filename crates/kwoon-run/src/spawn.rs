@@ -71,6 +71,15 @@ pub struct Outcome {
 
 /// Starts bubblewrap as `invocation` says and waits for it, up to `deadline`.
 pub fn run(invocation: &Invocation, deadline: Duration) -> io::Result<Outcome> {
+    // A NUL inside an option would end it early on the pipe, and bubblewrap would take
+    // the rest as further options. argv refused it at spawn; refuse it here. The value
+    // stays out of the error, which kwoon prints.
+    if invocation.options.iter().any(|o| o.as_bytes().contains(&0)) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a bubblewrap option contains a NUL byte",
+        ));
+    }
     let (read, write) = pipe()?;
     let fd = read.as_raw_fd();
     let mut command = Command::new(&invocation.program);
@@ -176,4 +185,30 @@ fn drain(mut pipe: impl Read + Send + 'static) -> mpsc::Receiver<Vec<u8>> {
         let _ = tx.send(kept);
     });
     rx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn an_option_containing_nul_is_refused_before_anything_starts() {
+        // Standing in for bubblewrap, a program that leaves a mark when it starts.
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("bwrap");
+        let mark = dir.path().join("started");
+        fs::write(&program, format!("#!/bin/sh\n: > '{}'\n", mark.display())).unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+        let invocation = Invocation {
+            program,
+            options: vec!["--setenv".into(), "K".into(), "x\0--bind\0/\0/".into()],
+            command: vec!["/probe".into()],
+        };
+        let err = run(&invocation, Duration::from_secs(5)).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(!err.to_string().contains("--bind"), "{err}");
+        assert!(!mark.exists(), "the program was started");
+    }
 }

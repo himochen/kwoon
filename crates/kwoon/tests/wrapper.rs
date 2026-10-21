@@ -337,17 +337,21 @@ fn a_forbidden_variable_fails_even_when_declared() {
 }
 
 /// Every process on the host whose command line holds `needle`, with that command line.
-fn command_lines_holding(needle: &str) -> Vec<(u32, String)> {
+/// Every host process's command line, its arguments split.
+fn command_lines() -> Vec<(u32, Vec<String>)> {
     let mut found = Vec::new();
     for entry in fs::read_dir("/proc").unwrap().flatten() {
         let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
             continue;
         };
+        // A process that exits between the listing and the read has no command line
+        // left to leak.
         if let Ok(cmdline) = fs::read(entry.path().join("cmdline")) {
-            let cmdline = String::from_utf8_lossy(&cmdline).replace('\0', " ");
-            if cmdline.contains(needle) {
-                found.push((pid, cmdline));
-            }
+            let args = String::from_utf8_lossy(&cmdline)
+                .split_terminator('\0')
+                .map(str::to_string)
+                .collect();
+            found.push((pid, args));
         }
     }
     found
@@ -358,14 +362,21 @@ fn a_provider_credential_is_in_no_command_line() {
     // Maintainer decision on #20: bubblewrap's arguments go through --args <fd>, so
     // no process kwoon starts, bubblewrap or anything inside, carries the credential
     // in its command line. The harness holds the run open while the test looks.
-    const KEY: &str = "canary-provider-key-41d7";
+    let key = format!(
+        "canary-provider-key-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
     let fixture = Fixture::new();
     let mut harness = fixture.harness("pause");
     harness.provider_env = Some("FAKE_PROVIDER_KEY");
     fixture.write_settings(&harness);
     let mut kwoon = fixture
         .command()
-        .env("FAKE_PROVIDER_KEY", KEY)
+        .env("FAKE_PROVIDER_KEY", &key)
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
@@ -377,25 +388,78 @@ fn a_provider_credential_is_in_no_command_line() {
             .any(|run| run.path().join("home/started").exists())
     };
     wait_for("the harness to start", Duration::from_secs(20), started);
-    let harness_seen = !harness_processes(&fixture.bin).is_empty();
-    let bwrap = command_lines_holding(&fixture.bin.join("fake-harness").display().to_string());
-    let leaked = command_lines_holding(KEY);
+    // One snapshot for the leak check and its controls alike.
+    let snapshot = command_lines();
     for run in fs::read_dir(&fixture.runs).unwrap().flatten() {
         fs::write(run.path().join("home/release"), "").unwrap();
     }
     let mut stdout = String::new();
     std::io::Read::read_to_string(&mut kwoon.stdout.take().unwrap(), &mut stdout).unwrap();
     let status = kwoon.wait().unwrap();
-    assert_eq!(leaked, Vec::new(), "the credential is in a command line");
-    // The controls: the scan saw the running harness and its bubblewrap, which got
-    // its options through --args, and the harness got the credential as a variable.
-    assert!(harness_seen);
+    let leaked: Vec<_> = snapshot
+        .iter()
+        .filter(|(_, args)| args.iter().any(|arg| arg.contains(&key)))
+        .collect();
+    assert_eq!(
+        leaked,
+        Vec::<&(u32, Vec<String>)>::new(),
+        "the credential is in a command line"
+    );
+    // The controls, from the same snapshot: it holds the running harness and its
+    // bubblewrap, which got its options through --args, and the harness got the
+    // credential as a variable.
+    let script = fixture.bin.join("fake-harness").display().to_string();
+    let is_bwrap = |args: &[String]| args.first().is_some_and(|a| a.ends_with("bwrap"));
+    let around_harness: Vec<_> = snapshot
+        .iter()
+        .filter(|(_, args)| args.contains(&script))
+        .collect();
     assert!(
-        bwrap.iter().any(|(_, line)| line.contains("--args")),
-        "{bwrap:?}"
+        around_harness.iter().any(|(_, args)| !is_bwrap(args)),
+        "the harness is not in the snapshot: {around_harness:?}"
+    );
+    assert!(
+        around_harness
+            .iter()
+            .any(|(_, args)| is_bwrap(args) && args.get(1).is_some_and(|a| a == "--args")),
+        "{around_harness:?}"
     );
     assert!(status.success(), "{stdout}");
-    assert!(!stdout.contains(KEY));
+    assert!(!stdout.contains(&key));
+}
+
+#[test]
+fn the_bwrap_spy_refuses_an_option_holding_a_newline() {
+    // The spy rebuilds bubblewrap's options one per line, so it must refuse an option
+    // that a newline would split, rather than pass bubblewrap a different list.
+    let fixture = Fixture::new();
+    let log = fixture.spy("");
+    let spy = fixture.root.join("spy/bwrap");
+    let feed = |options: &str| {
+        let mut child = Command::new(&spy)
+            .args(["--args", "0"])
+            .env_clear()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        std::io::Write::write_all(&mut child.stdin.take().unwrap(), options.as_bytes()).unwrap();
+        child.wait_with_output().unwrap()
+    };
+    // Control: well-formed options reach the real bubblewrap.
+    let good = feed("--version\0");
+    assert!(good.status.success(), "{good:?}");
+    assert!(String::from_utf8_lossy(&good.stdout).starts_with("bubblewrap"));
+    let bad = feed("--version\0a\nb\0");
+    assert!(!bad.status.success());
+    assert!(String::from_utf8_lossy(&bad.stderr).contains("an option contains a newline"));
+    let logged = fs::read_to_string(&log).unwrap();
+    let execs = logged
+        .lines()
+        .filter(|line| line.starts_with("exec "))
+        .count();
+    assert_eq!(execs, 1, "only the control reached bubblewrap: {logged}");
 }
 
 #[test]

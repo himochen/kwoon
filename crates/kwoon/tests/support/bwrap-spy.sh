@@ -29,9 +29,18 @@ if [ "${1:-}" = --args ]; then
     fd=$2
     shift 2
     options="$here/options.$$"
-    eval "/usr/bin/tr '\\0' '\\n' <&$fd" > "$options"
+    eval "/usr/bin/cat <&$fd" > "$options"
     # Close it, as bubblewrap does once it has read it: nothing else may inherit it.
     eval "exec $fd<&-"
+    # The options are rebuilt one per line below, so an option holding a newline would
+    # become two, which bubblewrap never does. Refuse it rather than mirror it wrongly.
+    if [ "$(/usr/bin/tr -dc '\n' < "$options" | /usr/bin/wc -c)" -ne 0 ]; then
+        /usr/bin/rm -f "$options"
+        echo "bwrap-spy: an option contains a newline; refusing to split it" >&2
+        exit 1
+    fi
+    /usr/bin/tr '\0' '\n' < "$options" > "$options.lines"
+    /usr/bin/mv "$options.lines" "$options"
     count=$#
     while IFS= read -r option; do set -- "$@" "$option"; done < "$options"
     /usr/bin/rm -f "$options"

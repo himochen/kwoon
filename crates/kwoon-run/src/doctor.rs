@@ -184,7 +184,7 @@ fn check_in(host: &Host, harness: &Harness, run: &RunDir) -> Vec<Item> {
     };
 
     // Stage 3: the harness itself, only when nothing it could leak is in reach.
-    if !report.all_ok() {
+    if hides_state(&report).status != Status::Verified {
         let why = "stage 3 (harness execution) not run: wrapper-hides-state did not pass";
         return finish(Stages::Withheld(why), Some(&report), config_clean, None);
     }
@@ -276,21 +276,7 @@ fn finish(
             ),
         ),
         Some(report) => {
-            let failed: Vec<String> = report
-                .checks
-                .iter()
-                .filter(|c| !c.ok)
-                .map(|c| format!("{}: {}", c.name, c.detail))
-                .collect();
-            let hides = if failed.is_empty() {
-                item("wrapper-hides-state", Status::Verified, "")
-            } else {
-                item(
-                    "wrapper-hides-state",
-                    Status::NotProvided,
-                    failed.join("; "),
-                )
-            };
+            let hides = hides_state(report);
             let mut reached: Vec<String> = report
                 .reachable_tcp
                 .iter()
@@ -302,15 +288,23 @@ fn finish(
                     .iter()
                     .map(|a| format!("unix {a}")),
             );
-            let detail = if reached.is_empty() {
-                "none".to_string()
+            let reachable = if !report.reachable_errors.is_empty() {
+                let errors = report.reachable_errors.join("; ");
+                item(
+                    "wrapper-reachable-services",
+                    Status::Unknown,
+                    format!("the scan was incomplete: {errors}"),
+                )
+            } else if reached.is_empty() {
+                item("wrapper-reachable-services", Status::Verified, "none")
             } else {
-                reached.join(", ")
+                item(
+                    "wrapper-reachable-services",
+                    Status::Verified,
+                    reached.join(", "),
+                )
             };
-            (
-                hides,
-                item("wrapper-reachable-services", Status::Verified, detail),
-            )
+            (hides, reachable)
         }
     };
     let starts = starts.unwrap_or_else(|| {
@@ -321,6 +315,33 @@ fn finish(
         )
     });
     vec![wrapper_starts, hides, reachable, config_clean, starts]
+}
+
+/// `wrapper-hides-state` from a full-layout report: verified only when every required
+/// check is present once and passed.
+fn hides_state(report: &Report) -> Item {
+    if let Some(why) = report.incomplete() {
+        return item(
+            "wrapper-hides-state",
+            Status::Unknown,
+            format!("the probe report is incomplete: {why}"),
+        );
+    }
+    let failed: Vec<String> = report
+        .checks
+        .iter()
+        .filter(|c| !c.ok)
+        .map(|c| format!("{}: {}", c.name, c.detail))
+        .collect();
+    if failed.is_empty() {
+        item("wrapper-hides-state", Status::Verified, "")
+    } else {
+        item(
+            "wrapper-hides-state",
+            Status::NotProvided,
+            failed.join("; "),
+        )
+    }
 }
 
 /// The files and variables seeded for this harness.

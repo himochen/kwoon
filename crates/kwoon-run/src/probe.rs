@@ -66,6 +66,16 @@ pub struct Check {
     pub detail: String,
 }
 
+/// The checks a full-layout report must hold, each exactly once.
+pub const REQUIRED_CHECKS: [&str; 6] = [
+    "files",
+    "store-write",
+    "mounts",
+    "descriptors",
+    "sockets",
+    "environment",
+];
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Report {
     pub stage: Stage,
@@ -73,11 +83,29 @@ pub struct Report {
     pub checks: Vec<Check>,
     pub reachable_tcp: Vec<String>,
     pub reachable_abstract: Vec<String>,
+    /// What the service scan could not observe. Non-empty means the lists above may be
+    /// incomplete.
+    pub reachable_errors: Vec<String>,
 }
 
 impl Report {
-    pub fn all_ok(&self) -> bool {
-        self.checks.iter().all(|check| check.ok)
+    /// Why the checks do not form a complete report: a required check missing or
+    /// repeated, or one kwoon does not know.
+    pub fn incomplete(&self) -> Option<String> {
+        let mut problems = Vec::new();
+        for name in REQUIRED_CHECKS {
+            match self.checks.iter().filter(|c| c.name == name).count() {
+                1 => {}
+                0 => problems.push(format!("missing check {name}")),
+                _ => problems.push(format!("repeated check {name}")),
+            }
+        }
+        for check in &self.checks {
+            if !REQUIRED_CHECKS.contains(&check.name.as_str()) {
+                problems.push(format!("unknown check {}", check.name));
+            }
+        }
+        (!problems.is_empty()).then(|| problems.join("; "))
     }
 }
 
@@ -89,6 +117,7 @@ pub fn run(request: &Request) -> Report {
         checks: Vec::new(),
         reachable_tcp: Vec::new(),
         reachable_abstract: Vec::new(),
+        reachable_errors: Vec::new(),
     };
     if request.stage == Stage::Namespace {
         return report;
@@ -102,8 +131,15 @@ pub fn run(request: &Request) -> Report {
         check_sockets(request),
         check_environment(request),
     ];
-    report.reachable_tcp = reachable_tcp();
-    report.reachable_abstract = reachable_abstract();
+    let tables = [
+        (Path::new("/proc/net/tcp"), false),
+        (Path::new("/proc/net/tcp6"), true),
+    ];
+    let (tcp, tcp_errors) = reachable_tcp(&tables);
+    let (unix, unix_errors) = reachable_abstract(Path::new("/proc/net/unix"));
+    report.reachable_tcp = tcp;
+    report.reachable_abstract = unix;
+    report.reachable_errors = [tcp_errors, unix_errors].concat();
     report
 }
 
@@ -312,17 +348,27 @@ fn check_descriptors() -> Check {
 /// Sockets: the operator's SSH agent and session bus cannot be reached.
 fn check_sockets(request: &Request) -> Check {
     let mut problems = Vec::new();
-    if let Some(path) = &request.ssh_auth_sock
-        && connect_unix(&UnixTarget::Path(path.clone()))
-    {
-        problems.push(format!("SSH agent reachable at {path}"));
+    // A socket that cannot be tried is not shown unreachable: it fails the check.
+    if let Some(path) = &request.ssh_auth_sock {
+        match connect_unix(&UnixTarget::Path(path.clone())) {
+            Ok(false) => {}
+            Ok(true) => problems.push(format!("SSH agent reachable at {path}")),
+            Err(err) => problems.push(format!("cannot check SSH agent at {path}: {err}")),
+        }
     }
     if let Some(address) = &request.dbus_address {
         match bus_addresses(address) {
             Ok(targets) => {
                 for target in targets {
-                    if connect_unix(&target) {
-                        problems.push(format!("session bus reachable at {}", target.describe()));
+                    match connect_unix(&target) {
+                        Ok(false) => {}
+                        Ok(true) => {
+                            problems.push(format!("session bus reachable at {}", target.describe()))
+                        }
+                        Err(err) => problems.push(format!(
+                            "cannot check session bus at {}: {err}",
+                            target.describe()
+                        )),
                     }
                 }
             }
@@ -396,8 +442,10 @@ fn dbus_unescape(value: &str) -> String {
 
 /// Whether a Unix stream listener answers at `target`. The connect does not block: a
 /// listener whose accept queue is full would otherwise hold the probe until its
-/// deadline. "Would block" means a listener exists, so it counts as reachable.
-fn connect_unix(target: &UnixTarget) -> bool {
+/// deadline. "Would block" means a listener exists, so it counts as reachable. Only
+/// the errors that mean nothing listens there count as unreachable; any other failure,
+/// including one to create the socket, is an error: the target was not tried.
+fn connect_unix(target: &UnixTarget) -> Result<bool, String> {
     let (bytes, abstract_name) = match target {
         UnixTarget::Path(path) => (path.as_bytes(), false),
         UnixTarget::Abstract(name) => (name.as_bytes(), true),
@@ -408,7 +456,7 @@ fn connect_unix(target: &UnixTarget) -> bool {
     let offset = usize::from(abstract_name);
     if bytes.is_empty() || offset + bytes.len() > addr.sun_path.len() - usize::from(!abstract_name)
     {
-        return false;
+        return Err("the address does not fit a Unix socket address".into());
     }
     for (slot, byte) in addr.sun_path[offset..].iter_mut().zip(bytes) {
         *slot = *byte as libc::c_char;
@@ -422,16 +470,29 @@ fn connect_unix(target: &UnixTarget) -> bool {
             0,
         );
         if fd < 0 {
-            return false;
+            return Err(format!(
+                "cannot create a socket: {}",
+                io::Error::last_os_error()
+            ));
         }
         let rc = libc::connect(
             fd,
             (&raw const addr).cast::<libc::sockaddr>(),
             len as libc::socklen_t,
         );
-        let errno = io::Error::last_os_error().raw_os_error();
+        let err = io::Error::last_os_error();
         libc::close(fd);
-        rc == 0 || matches!(errno, Some(libc::EAGAIN) | Some(libc::EINPROGRESS))
+        if rc == 0 {
+            return Ok(true);
+        }
+        match err.raw_os_error() {
+            Some(libc::EAGAIN | libc::EINPROGRESS) => Ok(true),
+            // A socket of another type (for example a datagram one) exists there, and a
+            // run can reach it with a socket of that type.
+            Some(libc::EPROTOTYPE) => Ok(true),
+            Some(libc::ENOENT | libc::ECONNREFUSED | libc::ENOTDIR | libc::EACCES) => Ok(false),
+            _ => Err(err.to_string()),
+        }
     }
 }
 
@@ -455,26 +516,36 @@ fn check_environment(request: &Request) -> Check {
     check("environment", problems)
 }
 
-/// Loopback TCP ports in the shared network namespace that accept a connection.
-fn reachable_tcp() -> Vec<String> {
+/// Loopback TCP ports in the shared network namespace that accept a connection, and
+/// what could not be observed. A missing IPv6 table means the kernel has no IPv6, so
+/// nothing can listen there; any other read failure is an error.
+fn reachable_tcp(tables: &[(&Path, bool)]) -> (Vec<String>, Vec<String>) {
     let mut found = BTreeSet::new();
-    for (table, v6) in [("/proc/net/tcp", false), ("/proc/net/tcp6", true)] {
-        let Ok(text) = fs::read_to_string(table) else {
-            continue;
+    let mut errors = Vec::new();
+    for (table, v6) in tables {
+        let text = match fs::read_to_string(table) {
+            Ok(text) => text,
+            Err(err) if *v6 && err.kind() == io::ErrorKind::NotFound => continue,
+            Err(err) => {
+                errors.push(format!("cannot read {}: {err}", table.display()));
+                continue;
+            }
         };
         for line in text.lines().skip(1) {
             let fields: Vec<&str> = line.split_whitespace().collect();
+            let port = fields
+                .get(1)
+                .and_then(|local| local.split_once(':'))
+                .and_then(|(_, port)| u16::from_str_radix(port, 16).ok());
+            let (Some(state), Some(port)) = (fields.get(3), port) else {
+                errors.push(format!("unreadable line in {}", table.display()));
+                continue;
+            };
             // State 0A is LISTEN.
-            if fields.len() < 4 || fields[3] != "0A" {
+            if *state != "0A" {
                 continue;
             }
-            let Some((_, port_hex)) = fields[1].split_once(':') else {
-                continue;
-            };
-            let Ok(port) = u16::from_str_radix(port_hex, 16) else {
-                continue;
-            };
-            let addr: SocketAddr = if v6 {
+            let addr: SocketAddr = if *v6 {
                 ([0, 0, 0, 0, 0, 0, 0, 1], port).into()
             } else {
                 ([127, 0, 0, 1], port).into()
@@ -484,26 +555,40 @@ fn reachable_tcp() -> Vec<String> {
             }
         }
     }
-    found.into_iter().collect()
+    (found.into_iter().collect(), errors)
 }
 
-/// Abstract Unix sockets in the shared network namespace that accept a connection.
-fn reachable_abstract() -> Vec<String> {
+/// Abstract Unix sockets in the shared network namespace that accept a connection, and
+/// what could not be observed.
+fn reachable_abstract(table: &Path) -> (Vec<String>, Vec<String>) {
     let mut found = BTreeSet::new();
-    let Ok(text) = fs::read_to_string("/proc/net/unix") else {
-        return Vec::new();
+    let mut errors = Vec::new();
+    let text = match fs::read_to_string(table) {
+        Ok(text) => text,
+        Err(err) => {
+            return (
+                Vec::new(),
+                vec![format!("cannot read {}: {err}", table.display())],
+            );
+        }
     };
     for line in text.lines().skip(1) {
-        let Some(path) = line.split_whitespace().nth(7) else {
+        let Some(name) = line
+            .split_whitespace()
+            .nth(7)
+            .and_then(|p| p.strip_prefix('@'))
+        else {
             continue;
         };
-        if let Some(name) = path.strip_prefix('@')
-            && connect_unix(&UnixTarget::Abstract(name.to_string()))
-        {
-            found.insert(format!("@{name}"));
+        match connect_unix(&UnixTarget::Abstract(name.to_string())) {
+            Ok(true) => {
+                found.insert(format!("@{name}"));
+            }
+            Ok(false) => {}
+            Err(err) => errors.push(format!("cannot try @{name}: {err}")),
         }
     }
-    found.into_iter().collect()
+    (found.into_iter().collect(), errors)
 }
 
 #[cfg(test)]
@@ -524,20 +609,66 @@ mod tests {
         let target = UnixTarget::Abstract(name);
         let start = Instant::now();
         for _ in 0..8 {
-            assert!(connect_unix(&target));
+            assert_eq!(connect_unix(&target), Ok(true));
         }
         assert!(start.elapsed() < Duration::from_secs(2));
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sock");
         let _listener = UnixListener::bind(&path).unwrap();
-        assert!(connect_unix(&UnixTarget::Path(path.display().to_string())));
-        assert!(!connect_unix(&UnixTarget::Path(
-            dir.path().join("absent").display().to_string()
-        )));
-        assert!(!connect_unix(&UnixTarget::Abstract(
-            "kwoon-probe-unit-absent".into()
-        )));
+        assert_eq!(
+            connect_unix(&UnixTarget::Path(path.display().to_string())),
+            Ok(true)
+        );
+        assert_eq!(
+            connect_unix(&UnixTarget::Path(
+                dir.path().join("absent").display().to_string()
+            )),
+            Ok(false)
+        );
+        assert_eq!(
+            connect_unix(&UnixTarget::Abstract("kwoon-probe-unit-absent".into())),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn a_socket_that_cannot_be_tried_is_an_error_not_unreachable() {
+        // Review R1, finding 4: an address no socket can have was reported unreachable.
+        let long = format!("/tmp/{}", "x".repeat(200));
+        assert!(connect_unix(&UnixTarget::Path(long.clone())).is_err());
+        let request = Request {
+            stage: Stage::Full,
+            protected: Vec::new(),
+            mounts: Vec::new(),
+            env: Vec::new(),
+            state_dir: None,
+            ssh_auth_sock: Some(long),
+            dbus_address: None,
+        };
+        let check = check_sockets(&request);
+        assert!(!check.ok);
+        assert!(
+            check
+                .detail
+                .starts_with("cannot check SSH agent at /tmp/xxx")
+        );
+    }
+
+    #[test]
+    fn unreadable_service_tables_are_reported_not_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let absent = dir.path().join("absent");
+        let (found, errors) = reachable_tcp(&[(&absent, false)]);
+        assert!(found.is_empty());
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        // A missing IPv6 table means no IPv6, and no error.
+        assert_eq!(reachable_tcp(&[(&absent, true)]).1, Vec::<String>::new());
+        let (_, errors) = reachable_abstract(&absent);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        let garbled = dir.path().join("tcp");
+        fs::write(&garbled, "header\nnot a table line\n").unwrap();
+        assert_eq!(reachable_tcp(&[(&garbled, false)]).1.len(), 1);
     }
 
     #[test]

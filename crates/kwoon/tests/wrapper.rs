@@ -684,6 +684,101 @@ fn a_harness_without_a_session_log_is_not_verified() {
     assert_eq!(run.code, 1);
 }
 
+/// A stage-2 probe report in which every check passed, for the spy to hand to kwoon in
+/// place of the real one.
+fn passing_report() -> serde_json::Value {
+    let checks: Vec<serde_json::Value> = [
+        "files",
+        "store-write",
+        "mounts",
+        "descriptors",
+        "sockets",
+        "environment",
+    ]
+    .iter()
+    .map(|name| serde_json::json!({"name": name, "ok": true, "detail": ""}))
+    .collect();
+    serde_json::json!({
+        "stage": "full",
+        "pid": 2,
+        "checks": checks,
+        "reachable_tcp": [],
+        "reachable_abstract": [],
+        "reachable_errors": [],
+    })
+}
+
+/// Runs the doctor with `report` in place of the real stage-2 probe report.
+fn doctor_with_report(report: &str) -> Run {
+    let fixture = Fixture::new();
+    let file = fixture.root.join("canned-report.json");
+    fs::write(&file, report).unwrap();
+    fixture.spy(&format!("report {}", file.display()));
+    fixture.doctor(&fixture.harness("ok"))
+}
+
+#[test]
+fn the_canned_passing_report_is_accepted() {
+    // The control for the tests below: the spy's report is what kwoon reads.
+    doctor_with_report(&passing_report().to_string()).assert_verified();
+}
+
+#[test]
+fn a_probe_report_without_checks_is_not_verified() {
+    // Review R1, finding 4: an empty check list is no evidence.
+    let mut report = passing_report();
+    report["checks"] = serde_json::json!([]);
+    let run = doctor_with_report(&report.to_string());
+    let hides = run.item("wrapper-hides-state");
+    assert!(
+        hides.starts_with("unknown: the probe report is incomplete: missing check files"),
+        "{hides}"
+    );
+    assert!(run.item("harness-starts-in-wrapper").starts_with("unknown"));
+    assert_eq!(run.code, 1);
+}
+
+#[test]
+fn a_probe_report_missing_one_check_is_not_verified() {
+    let mut report = passing_report();
+    report["checks"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|c| c["name"] != "sockets");
+    let run = doctor_with_report(&report.to_string());
+    let hides = run.item("wrapper-hides-state");
+    assert_eq!(
+        hides,
+        "unknown: the probe report is incomplete: missing check sockets"
+    );
+    assert_eq!(run.code, 1);
+}
+
+#[test]
+fn unavailable_service_evidence_is_unknown() {
+    let mut report = passing_report();
+    report["reachable_errors"] = serde_json::json!(["cannot read /proc/net/tcp: denied"]);
+    let run = doctor_with_report(&report.to_string());
+    assert_eq!(
+        run.item("wrapper-reachable-services"),
+        "unknown: the scan was incomplete: cannot read /proc/net/tcp: denied"
+    );
+    assert_eq!(run.code, 1);
+}
+
+#[test]
+fn a_malformed_probe_report_fails_stage_2() {
+    for report in ["not json", ""] {
+        let run = doctor_with_report(report);
+        assert_eq!(
+            run.item("wrapper-starts"),
+            "not provided: stage 2 (filesystem setup): probe execution failed: no valid probe report",
+            "{report:?}"
+        );
+        assert_eq!(run.code, 1);
+    }
+}
+
 #[test]
 fn harness_output_is_never_reported() {
     let fixture = Fixture::new();

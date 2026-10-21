@@ -153,6 +153,13 @@ fn check_in(host: &Host, harness: &Harness, run: &RunDir) -> Vec<Item> {
         return finish(Stages::Failed(why), None, config_clean, None);
     }
 
+    // Stages 2 and 3 carry the seeded variables on bubblewrap's command line, so
+    // neither is built when the scan refused one of them.
+    if config_clean.status != Status::Verified {
+        let why = "stages 2 and 3 not run: harness-config-clean did not pass";
+        return finish(Stages::Withheld(why), None, config_clean, None);
+    }
+
     // Stage 2: the probe with the complete production layout.
     let layout = run_layout(host, harness, run, &env);
     let stage2 = layout.clone().ro_bind(&host.probe, PROBE_PATH);
@@ -175,12 +182,8 @@ fn check_in(host: &Host, harness: &Harness, run: &RunDir) -> Vec<Item> {
         };
 
     // Stage 3: the harness itself, only when nothing it could leak is in reach.
-    if config_clean.status != Status::Verified {
-        let why = "harness-config-clean did not pass";
-        return finish(Stages::Withheld(why), Some(&report), config_clean, None);
-    }
     if !report.all_ok() {
-        let why = "wrapper-hides-state did not pass";
+        let why = "stage 3 (harness execution) not run: wrapper-hides-state did not pass";
         return finish(Stages::Withheld(why), Some(&report), config_clean, None);
     }
     let command = harness.kind.command(&harness.executable, &run.home, PROMPT);
@@ -241,7 +244,7 @@ fn check_in(host: &Host, harness: &Harness, run: &RunDir) -> Vec<Item> {
 /// How far the three stages got.
 enum Stages {
     AllRan,
-    /// Stage 3 was not run, for this reason.
+    /// Later stages were not run: which ones, and why.
     Withheld(&'static str),
     Failed(String),
 }
@@ -254,11 +257,7 @@ fn finish(
 ) -> Vec<Item> {
     let wrapper_starts = match stages {
         Stages::AllRan => item("wrapper-starts", Status::Verified, ""),
-        Stages::Withheld(why) => item(
-            "wrapper-starts",
-            Status::Unknown,
-            format!("stage 3 (harness execution) not run: {why}"),
-        ),
+        Stages::Withheld(why) => item("wrapper-starts", Status::Unknown, why),
         Stages::Failed(why) => item("wrapper-starts", Status::NotProvided, why),
     };
     let (hides, reachable) = match report {

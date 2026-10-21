@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 const KWOON: &str = env!("CARGO_BIN_EXE_kwoon");
 const FAKE_HARNESS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/fake-harness.sh");
+const BWRAP_SPY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/bwrap-spy.sh");
 
 /// Bytes that must never appear in anything kwoon prints.
 const CANARY: &str = "canary-bytes-6f1d2c";
@@ -185,6 +186,7 @@ fixture_endpoints = ["https://api.github.com"]
 [paths]
 state_dir = {state}
 runs_dir = {runs}
+bwrap = {bwrap}
 
 [credentials.fixture]
 file = {credential}
@@ -200,6 +202,7 @@ provider_credential = {{ file = {provider} }}
 "#,
             state = quote(&self.state),
             runs = quote(&self.runs),
+            bwrap = quote(&self.bwrap()),
             credential = quote(&self.credential),
             executable = quote(&harness.executable),
             binds = binds.join(", "),
@@ -208,6 +211,28 @@ provider_credential = {{ file = {provider} }}
             env = env.join("\n"),
         );
         fs::write(self.config.join("settings.toml"), text).unwrap();
+    }
+
+    /// The bubblewrap kwoon is told to use: the spy once [`Fixture::spy`] installed it.
+    fn bwrap(&self) -> PathBuf {
+        let spy = self.root.join("spy/bwrap");
+        if spy.exists() {
+            spy
+        } else {
+            "/usr/bin/bwrap".into()
+        }
+    }
+
+    /// Puts the bubblewrap spy in place, outside every tree bound into the wrapper, with
+    /// `mode` (see `tests/support/bwrap-spy.sh`). Returns its log.
+    fn spy(&self, mode: &str) -> PathBuf {
+        let dir = self.root.join("spy");
+        fs::create_dir_all(&dir).unwrap();
+        let spy = dir.join("bwrap");
+        fs::copy(BWRAP_SPY, &spy).unwrap();
+        fs::set_permissions(&spy, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(dir.join("mode"), format!("{mode}\n")).unwrap();
+        dir.join("log")
     }
 
     fn command(&self) -> Command {
@@ -608,6 +633,30 @@ fn a_forge_credential_in_a_seeded_variable_fails_config_clean() {
     );
     assert_eq!(run.code, 1);
     run.assert_no_secret();
+}
+
+#[test]
+fn a_rejected_value_never_reaches_bubblewrap() {
+    // Review R1, finding 3: once harness-config-clean refuses a value, no stage that
+    // would carry it is built or started.
+    let fixture = Fixture::new();
+    let log = fixture.spy("");
+    let mut harness = fixture.harness("ok");
+    harness.env.push(("LEAK".into(), FORGE_TOKEN.into()));
+    let run = fixture.doctor(&harness);
+    assert!(run.item("harness-config-clean").starts_with("not provided"));
+    assert_eq!(run.code, 1);
+    let log = fs::read_to_string(log).unwrap();
+    // Stage 1 ran through the spy, which carries no harness variable.
+    assert!(log.contains("[__probe]"), "{log}");
+    assert!(
+        !log.contains(FORGE_TOKEN),
+        "the rejected value reached bubblewrap:\n{log}"
+    );
+    assert!(!log.contains("[LEAK]"), "{log}");
+    for name in ["wrapper-hides-state", "harness-starts-in-wrapper"] {
+        assert!(run.item(name).starts_with("unknown"), "{name}");
+    }
 }
 
 #[test]

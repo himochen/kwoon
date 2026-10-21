@@ -757,20 +757,15 @@ fn reachable_tcp(tables: &[(&Path, bool)]) -> (Vec<String>, Vec<String>) {
     (found.into_iter().collect(), errors)
 }
 
-/// Whether a connection attempt to a listening loopback port reached it. As for Unix
-/// sockets, only a refusal means nothing listens there; a listener that answers late or
-/// resets still listens. Any other failure means the port was not tried: an error.
+/// Whether a connection attempt to a listening loopback port reached it. Only an
+/// established connection counts as reachable and only a refusal as unreachable.
+/// Anything else, a timeout included (on loopback, a dropped SYN), is no evidence
+/// either way: an error, so the scan is reported incomplete.
 fn tcp_outcome(result: io::Result<TcpStream>) -> Result<bool, String> {
     match result {
         Ok(_) => Ok(true),
-        Err(err) => match err.kind() {
-            io::ErrorKind::ConnectionRefused => Ok(false),
-            io::ErrorKind::TimedOut
-            | io::ErrorKind::WouldBlock
-            | io::ErrorKind::ConnectionReset
-            | io::ErrorKind::ConnectionAborted => Ok(true),
-            _ => Err(err.to_string()),
-        },
+        Err(err) if err.kind() == io::ErrorKind::ConnectionRefused => Ok(false),
+        Err(err) => Err(err.to_string()),
     }
 }
 
@@ -1022,8 +1017,9 @@ mod tests {
         // Review R2: connect_timeout(..).is_ok() read every failure as "unreachable".
         let os = io::Error::from_raw_os_error;
         assert_eq!(tcp_outcome(Err(os(libc::ECONNREFUSED))), Ok(false));
-        // A listener that does not answer in time still listens there.
-        assert_eq!(tcp_outcome(Err(io::ErrorKind::TimedOut.into())), Ok(true));
+        // A timeout is not a connection (review R3, item A).
+        assert!(tcp_outcome(Err(io::ErrorKind::TimedOut.into())).is_err());
+        assert!(tcp_outcome(Err(os(libc::ECONNRESET))).is_err());
         assert!(tcp_outcome(Err(os(libc::EMFILE))).is_err());
         assert!(tcp_outcome(Err(os(libc::EADDRNOTAVAIL))).is_err());
         assert!(tcp_outcome(Err(os(libc::EPERM))).is_err());

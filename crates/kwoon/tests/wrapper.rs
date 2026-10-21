@@ -525,6 +525,52 @@ fn an_alias_of_the_operators_harness_credential_is_refused() {
 }
 
 #[test]
+fn a_writable_installation_mount_fails_even_when_declared() {
+    // Review R1, finding 6: the expectation must not come from the builder alone. The
+    // spy makes the harness's installation bind writable and edits the probe request
+    // so that it declares the bind writable too.
+    let fixture = Fixture::new();
+    let log = fixture.spy(&format!("writable {}", fixture.bin.display()));
+    let run = fixture.doctor(&fixture.harness("ok"));
+    // The spy did change the bind, so this is the case under test.
+    let log = fs::read_to_string(log).unwrap();
+    assert!(
+        log.contains(&format!("[--bind] [{0}] [{0}]", fixture.bin.display())),
+        "{log}"
+    );
+    let expected = format!(
+        "mounts: {} is writable, but only the run clone and the run home may be",
+        fixture.bin.display()
+    );
+    let hides = run.item("wrapper-hides-state");
+    assert!(
+        hides.starts_with("not provided: ") && hides.contains(&expected),
+        "{hides}"
+    );
+    assert!(run.item("harness-starts-in-wrapper").starts_with("unknown"));
+    assert_eq!(run.code, 1);
+}
+
+#[test]
+fn a_forbidden_variable_fails_even_when_declared() {
+    // Review R1, finding 6: host settings make the builder set, and so declare, these.
+    for name in ["GITHUB_TOKEN", "SSH_AUTH_SOCK"] {
+        let fixture = Fixture::new();
+        let mut harness = fixture.harness("ok");
+        harness.env.push((name.into(), "/not-a-secret".into()));
+        let run = fixture.doctor(&harness);
+        let hides = run.item("wrapper-hides-state");
+        assert!(
+            hides.starts_with("not provided: ")
+                && hides.contains(&format!("environment: forbidden variable {name}")),
+            "{name}: {hides}"
+        );
+        assert!(run.item("harness-starts-in-wrapper").starts_with("unknown"));
+        assert_eq!(run.code, 1);
+    }
+}
+
+#[test]
 fn an_inherited_descriptor_does_not_reach_the_wrapper() {
     let fixture = Fixture::new();
     fixture.write_settings(&fixture.harness("ok"));
@@ -991,6 +1037,8 @@ fn the_probe_detects_each_exposure_in_a_leaky_sandbox() {
         "state_dir": fixture.state,
         "ssh_auth_sock": null,
         "dbus_address": null,
+        "run_clone": null,
+        "run_home": null,
     });
     // The fixture root is bound at its own path below, so the probe reads this file there.
     let request_file = fixture.root.join("request.json");

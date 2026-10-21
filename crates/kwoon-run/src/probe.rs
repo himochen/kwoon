@@ -57,7 +57,30 @@ pub struct Request {
     /// The operator's `SSH_AUTH_SOCK` and `DBUS_SESSION_BUS_ADDRESS`, if set.
     pub ssh_auth_sock: Option<String>,
     pub dbus_address: Option<String>,
+    /// The run clone and the private run home: the only binds that may be writable.
+    /// They come from the run directory, not from the builder, so that the mount check
+    /// holds the layout to plan D5 and not only to what the builder declared.
+    pub run_clone: Option<PathBuf>,
+    pub run_home: Option<PathBuf>,
 }
+
+/// Mounts that bubblewrap itself makes writable: its root and `/tmp` tmpfs, and its
+/// `/dev`. They hold nothing of the host's files.
+const BUBBLEWRAP_WRITABLE: [&str; 3] = ["/", "/tmp", "/dev"];
+/// Trees that must be bound, read-only, in every layout (plan D5, "Mounts").
+const READ_ONLY_SYSTEM: [&str; 2] = ["/usr", "/etc"];
+/// Variables that must never be set inside the wrapper, whoever declared them (plan D5:
+/// the agent socket, the forge tokens, the session bus and the runtime directory).
+pub const FORBIDDEN_VARIABLES: [&str; 8] = [
+    "SSH_AUTH_SOCK",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "XDG_RUNTIME_DIR",
+    "GIT_ASKPASS",
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Check {
@@ -129,7 +152,7 @@ pub fn run(request: &Request) -> Report {
         check_mounts(request, &mounts),
         check_descriptors(),
         check_sockets(request),
-        check_environment(request),
+        check_environment(request, &variable_names()),
     ];
     let tables = [
         (Path::new("/proc/net/tcp"), false),
@@ -275,7 +298,9 @@ fn check_store_write(request: &Request) -> Check {
     check("store-write", problems)
 }
 
-/// Mounts: the mount table holds exactly the declared mounts, each with its access.
+/// Mounts: the mount table holds exactly the declared mounts, each with its access,
+/// and it meets plan D5 on its own terms: `/usr` and `/etc` are read-only, and no bind
+/// but the run clone and the run home is writable, whatever was declared.
 fn check_mounts(request: &Request, mounts: &io::Result<Vec<Mount>>) -> Check {
     let mounts = match mounts {
         Ok(mounts) => mounts,
@@ -294,6 +319,28 @@ fn check_mounts(request: &Request, mounts: &io::Result<Vec<Mount>>) -> Check {
                 }
                 _ => {}
             },
+        }
+    }
+    let writable_allowed = |point: &Path| {
+        BUBBLEWRAP_WRITABLE.iter().any(|p| point == Path::new(p))
+            || point.starts_with("/dev")
+            || point.starts_with("/proc")
+            || request.run_clone.as_deref() == Some(point)
+            || request.run_home.as_deref() == Some(point)
+    };
+    for mount in mounts.iter().filter(|m| !m.read_only) {
+        if !writable_allowed(&mount.point) {
+            problems.push(format!(
+                "{} is writable, but only the run clone and the run home may be",
+                mount.point.display()
+            ));
+        }
+    }
+    for system in READ_ONLY_SYSTEM {
+        match mounts.iter().find(|m| m.point == Path::new(system)) {
+            None => problems.push(format!("{system} is not bound")),
+            Some(mount) if !mount.read_only => problems.push(format!("{system} must be read-only")),
+            Some(_) => {}
         }
     }
     let present: HashSet<&Path> = mounts.iter().map(|m| m.point.as_path()).collect();
@@ -496,14 +543,23 @@ fn connect_unix(target: &UnixTarget) -> Result<bool, String> {
     }
 }
 
-/// Environment: it holds exactly the variables the builder set.
-fn check_environment(request: &Request) -> Check {
-    let expected: BTreeSet<&str> = request.env.iter().map(String::as_str).collect();
-    let present: BTreeSet<String> = std::env::vars_os()
+fn variable_names() -> BTreeSet<String> {
+    std::env::vars_os()
         .map(|(k, _)| k.to_string_lossy().into_owned())
-        .collect();
+        .collect()
+}
+
+/// Environment: it holds exactly the variables the builder set, and none of the
+/// forbidden ones, even if the builder declared it.
+fn check_environment(request: &Request, present: &BTreeSet<String>) -> Check {
+    let expected: BTreeSet<&str> = request.env.iter().map(String::as_str).collect();
     let mut problems = Vec::new();
-    for name in &present {
+    for name in present {
+        if FORBIDDEN_VARIABLES.contains(&name.as_str()) {
+            problems.push(format!("forbidden variable {name}"));
+        }
+    }
+    for name in present {
         if !expected.contains(name.as_str()) {
             problems.push(format!("unexpected variable {name}"));
         }
@@ -638,13 +694,8 @@ mod tests {
         let long = format!("/tmp/{}", "x".repeat(200));
         assert!(connect_unix(&UnixTarget::Path(long.clone())).is_err());
         let request = Request {
-            stage: Stage::Full,
-            protected: Vec::new(),
-            mounts: Vec::new(),
-            env: Vec::new(),
-            state_dir: None,
             ssh_auth_sock: Some(long),
-            dbus_address: None,
+            ..empty_request()
         };
         let check = check_sockets(&request);
         assert!(!check.ok);
@@ -653,6 +704,99 @@ mod tests {
                 .detail
                 .starts_with("cannot check SSH agent at /tmp/xxx")
         );
+    }
+
+    fn empty_request() -> Request {
+        Request {
+            stage: Stage::Full,
+            protected: Vec::new(),
+            mounts: Vec::new(),
+            env: Vec::new(),
+            state_dir: None,
+            ssh_auth_sock: None,
+            dbus_address: None,
+            run_clone: Some("/runs/1/clone".into()),
+            run_home: Some("/runs/1/home".into()),
+        }
+    }
+
+    fn mount(point: &str, read_only: bool) -> Mount {
+        Mount {
+            point: point.into(),
+            read_only,
+        }
+    }
+
+    fn declared(point: &str, access: Access) -> DeclaredMount {
+        DeclaredMount {
+            mount_point: point.into(),
+            access,
+            optional: false,
+        }
+    }
+
+    #[test]
+    fn the_mount_policy_does_not_take_the_builders_word() {
+        // Review R1, finding 6: every mount below is declared as observed.
+        let layout = |usr_read_only: bool, opt_read_only: bool| {
+            let mounts = vec![
+                mount("/", false),
+                mount("/usr", usr_read_only),
+                mount("/etc", true),
+                mount("/opt/harness", opt_read_only),
+                mount("/runs/1/clone", false),
+                mount("/runs/1/home", false),
+            ];
+            let access = |ro: bool| {
+                if ro {
+                    Access::ReadOnly
+                } else {
+                    Access::Writable
+                }
+            };
+            let request = Request {
+                mounts: vec![
+                    declared("/", Access::Any),
+                    declared("/usr", access(usr_read_only)),
+                    declared("/etc", Access::ReadOnly),
+                    declared("/opt/harness", access(opt_read_only)),
+                    declared("/runs/1/clone", Access::Writable),
+                    declared("/runs/1/home", Access::Writable),
+                ],
+                ..empty_request()
+            };
+            check_mounts(&request, &Ok(mounts))
+        };
+        assert!(layout(true, true).ok, "{}", layout(true, true).detail);
+        let writable_usr = layout(false, true);
+        assert!(!writable_usr.ok);
+        assert!(writable_usr.detail.contains("/usr must be read-only"));
+        let writable_opt = layout(true, false);
+        assert_eq!(
+            writable_opt.detail,
+            "/opt/harness is writable, but only the run clone and the run home may be"
+        );
+        // Without /usr at all, the layout fails even though nothing declared it.
+        let request = Request {
+            mounts: vec![
+                declared("/", Access::Any),
+                declared("/etc", Access::ReadOnly),
+            ],
+            ..empty_request()
+        };
+        let check = check_mounts(&request, &Ok(vec![mount("/", false), mount("/etc", true)]));
+        assert_eq!(check.detail, "/usr is not bound");
+    }
+
+    #[test]
+    fn a_forbidden_variable_fails_although_declared() {
+        let request = Request {
+            env: vec!["HOME".into(), "GITHUB_TOKEN".into()],
+            ..empty_request()
+        };
+        let present: BTreeSet<String> = ["HOME", "GITHUB_TOKEN"].map(String::from).into();
+        let check = check_environment(&request, &present);
+        assert_eq!(check.detail, "forbidden variable GITHUB_TOKEN");
     }
 
     #[test]

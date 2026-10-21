@@ -137,6 +137,8 @@ fn check_in(host: &Host, harness: &Harness, run: &RunDir) -> Vec<Item> {
         state_dir: None,
         ssh_auth_sock: None,
         dbus_address: None,
+        run_clone: None,
+        run_home: None,
     };
     if let Err(why) =
         run_probe(&stage1, &request, &request_file).and_then(|report| expect_pid_namespace(&report))
@@ -172,6 +174,8 @@ fn check_in(host: &Host, harness: &Harness, run: &RunDir) -> Vec<Item> {
         state_dir: Some(host.state_dir.clone()),
         ssh_auth_sock: host.ssh_auth_sock.clone(),
         dbus_address: host.dbus_address.clone(),
+        run_clone: Some(run.clone.clone()),
+        run_home: Some(run.home.clone()),
     };
     let report = match run_probe(&stage2, &request, &request_file)
         .and_then(|r| expect_pid_namespace(&r).map(|_| r))

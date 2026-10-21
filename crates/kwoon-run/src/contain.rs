@@ -12,7 +12,8 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::Path;
 
-/// Why a path was refused. The path is the run-relative one; no content is kept.
+/// Why a path was refused. No content is kept, and the path names only components
+/// kwoon fixed: a name the run chose shows as `*`, since run output can hold secrets.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rejected {
     pub path: String,
@@ -49,7 +50,7 @@ impl fmt::Display for Rejected {
 /// A directory opened under the containment rule.
 pub struct Dir {
     fd: OwnedFd,
-    /// The run-relative path, for diagnostics.
+    /// The run-relative path as diagnostics show it.
     path: String,
 }
 
@@ -84,21 +85,23 @@ impl Dir {
             fd: unsafe { OwnedFd::from_raw_fd(raw) },
             path: String::new(),
         };
-        parent.open_dir(OsStr::new(name))
+        parent.open_dir(OsStr::new(name), name)
     }
 
-    pub fn open_dir(&self, name: &OsStr) -> Result<Dir, Rejected> {
-        let fd = self.open_checked(name, Kind::Dir)?;
+    /// Opens the directory `name`, which diagnostics show as `shown`.
+    pub fn open_dir(&self, name: &OsStr, shown: &str) -> Result<Dir, Rejected> {
+        let fd = self.open_checked(name, shown, Kind::Dir)?;
         Ok(Dir {
             fd,
-            path: self.child_path(name),
+            path: self.child_path(shown),
         })
     }
 
-    /// Reads a singly linked regular file of at most `limit` bytes.
-    pub fn read_file(&self, name: &OsStr, limit: u64) -> Result<Vec<u8>, Rejected> {
-        let path = self.child_path(name);
-        let fd = self.open_checked(name, Kind::File)?;
+    /// Reads a singly linked regular file of at most `limit` bytes; diagnostics show it
+    /// as `shown`.
+    pub fn read_file(&self, name: &OsStr, shown: &str, limit: u64) -> Result<Vec<u8>, Rejected> {
+        let path = self.child_path(shown);
+        let fd = self.open_checked(name, shown, Kind::File)?;
         let mut bytes = Vec::new();
         File::from(fd)
             .take(limit + 1)
@@ -156,17 +159,16 @@ impl Dir {
         Ok(names)
     }
 
-    fn child_path(&self, name: &OsStr) -> String {
-        let name = name.to_string_lossy();
+    fn child_path(&self, shown: &str) -> String {
         if self.path.is_empty() {
-            name.into_owned()
+            shown.to_string()
         } else {
-            format!("{}/{name}", self.path)
+            format!("{}/{shown}", self.path)
         }
     }
 
-    fn open_checked(&self, name: &OsStr, kind: Kind) -> Result<OwnedFd, Rejected> {
-        let path = self.child_path(name);
+    fn open_checked(&self, name: &OsStr, shown: &str, kind: Kind) -> Result<OwnedFd, Rejected> {
+        let path = self.child_path(shown);
         let reject = |reason| Rejected {
             path: path.clone(),
             reason,
@@ -302,19 +304,22 @@ fn walk(
     let Some((first, rest)) = pattern.split_first() else {
         return Ok(());
     };
-    let names: Vec<OsString> = match first {
-        Component::Name(name) => vec![OsString::from(name)],
-        Component::Any { .. } => dir
-            .entries()?
-            .into_iter()
-            .filter(|n| first.matches(n))
-            .collect(),
+    // A fixed name is kwoon's and may be shown; a matched one is the run's.
+    let (names, shown): (Vec<OsString>, &str) = match first {
+        Component::Name(name) => (vec![OsString::from(name)], name),
+        Component::Any { .. } => (
+            dir.entries()?
+                .into_iter()
+                .filter(|n| first.matches(n))
+                .collect(),
+            "*",
+        ),
     };
     for name in names {
         if rest.is_empty() {
-            match dir.read_file(&name, limit) {
+            match dir.read_file(&name, shown, limit) {
                 Ok(bytes) => found.push(LogFile {
-                    path: dir.child_path(&name),
+                    path: dir.child_path(shown),
                     bytes,
                 }),
                 Err(Rejected {
@@ -324,7 +329,7 @@ fn walk(
                 Err(rejected) => return Err(rejected),
             }
         } else {
-            match dir.open_dir(&name) {
+            match dir.open_dir(&name, shown) {
                 Ok(child) => walk(&child, rest, limit, found)?,
                 Err(Rejected {
                     reason: Reason::Io(libc::ENOENT),
@@ -379,7 +384,7 @@ mod tests {
         fs::write(dir.path().join("home/logs/notes.txt"), "x").unwrap();
         let logs = extract(dir.path(), "home", PATTERN, 10).unwrap();
         assert_eq!(logs.len(), 1);
-        assert_eq!(logs[0].path, "home/logs/a.jsonl");
+        assert_eq!(logs[0].path, "home/logs/*");
         assert_eq!(logs[0].bytes, b"a");
         // A missing log directory means no logs, not an error.
         fs::remove_dir_all(dir.path().join("home/logs")).unwrap();

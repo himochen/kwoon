@@ -50,6 +50,16 @@ log-dir-symlink)
 projects-symlink)
     mkdir -p "$HOME/.claude" && ln -s "$FAKE_CANARY_DIR" "$projects"
     ;;
+log-named-by-key)
+    # Run-controlled names: the copied provider key as a directory and a file name,
+    # each refused entry a link, so a diagnostic naming it would print the key.
+    key=$(sed 's/.*"apiKey":"\([^"]*\)".*/\1/' "$HOME/.claude/.credentials.json")
+    mkdir -p "$log_dir" && ln -s "$FAKE_CANARY" "$log_dir/$key.jsonl"
+    ;;
+dir-named-by-key)
+    key=$(sed 's/.*"apiKey":"\([^"]*\)".*/\1/' "$HOME/.claude/.credentials.json")
+    mkdir -p "$projects" && ln -s "$FAKE_CANARY_DIR" "$projects/$key"
+    ;;
 log-fifo)
     mkdir -p "$log_dir" && mkfifo "$log"
     ;;

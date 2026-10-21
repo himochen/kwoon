@@ -654,18 +654,31 @@ fn assert_log_refused(mode: &'static str, reason: &str) {
 
 #[test]
 fn a_symlinked_log_is_refused_without_opening_its_target() {
-    assert_log_refused("log-symlink", "session.jsonl: symbolic link");
+    assert_log_refused("log-symlink", "home/.claude/projects/*/*: symbolic link");
 }
 
 #[test]
 fn a_symlinked_log_directory_is_refused_without_opening_its_target() {
-    assert_log_refused("log-dir-symlink", "projects/fixture: symbolic link");
+    assert_log_refused("log-dir-symlink", "home/.claude/projects/*: symbolic link");
     assert_log_refused("projects-symlink", ".claude/projects: symbolic link");
 }
 
 #[test]
+fn a_refused_log_name_is_not_printed() {
+    // Review R1, finding 5: names under the run home are run output.
+    assert_log_refused(
+        "log-named-by-key",
+        "home/.claude/projects/*/*: symbolic link",
+    );
+    assert_log_refused("dir-named-by-key", "home/.claude/projects/*: symbolic link");
+}
+
+#[test]
 fn a_special_file_at_the_log_is_refused() {
-    assert_log_refused("log-fifo", "session.jsonl: not a regular file or directory");
+    assert_log_refused(
+        "log-fifo",
+        "home/.claude/projects/*/*: not a regular file or directory",
+    );
 }
 
 #[test]

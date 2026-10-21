@@ -473,6 +473,58 @@ fn a_bound_file_inside_a_protected_directory_is_refused() {
 }
 
 #[test]
+fn binding_the_operators_claude_home_is_refused() {
+    // Review R1, finding 2; plan D5: the operator's ~/.claude is never bound.
+    let fixture = Fixture::new();
+    let claude = fixture.home.join(".claude");
+    let mut harness = fixture.harness("ok");
+    harness.ro_binds.push(claude.clone());
+    let run = fixture.doctor(&harness);
+    let expected = format!("mount {0} exposes {0}", claude.display());
+    assert_refused_before_the_harness(&run, &expected);
+}
+
+#[test]
+fn binding_the_operators_codex_home_is_refused() {
+    let fixture = Fixture::new();
+    let codex = fixture.home.join(".codex");
+    let mut harness = fixture.harness("ok");
+    harness.ro_binds.push(codex.clone());
+    let run = fixture.doctor(&harness);
+    let expected = format!("mount {0} exposes {0}", codex.display());
+    assert_refused_before_the_harness(&run, &expected);
+}
+
+#[test]
+fn binding_a_directory_enclosing_the_harness_homes_is_refused() {
+    // Without the gh and git credentials, only the harness homes make this refusal.
+    let fixture = Fixture::new();
+    fs::remove_dir_all(fixture.home.join(".config")).unwrap();
+    fs::remove_file(fixture.home.join(".git-credentials")).unwrap();
+    let mut harness = fixture.harness("ok");
+    harness.ro_binds.push(fixture.home.clone());
+    let run = fixture.doctor(&harness);
+    for home in [".claude", ".codex"] {
+        let expected = format!(
+            "mount {} exposes {}",
+            fixture.home.display(),
+            fixture.home.join(home).display()
+        );
+        assert_refused_before_the_harness(&run, &expected);
+    }
+}
+
+#[test]
+fn an_alias_of_the_operators_harness_credential_is_refused() {
+    let fixture = Fixture::new();
+    let credential = fixture.home.join(".claude/.credentials.json");
+    fs::hard_link(&credential, fixture.bin.join("innocent-name")).unwrap();
+    let run = fixture.doctor(&fixture.harness("ok"));
+    let expected = format!("{} has 2 links", credential.display());
+    assert_refused_before_the_harness(&run, &expected);
+}
+
+#[test]
 fn an_inherited_descriptor_does_not_reach_the_wrapper() {
     let fixture = Fixture::new();
     fixture.write_settings(&fixture.harness("ok"));

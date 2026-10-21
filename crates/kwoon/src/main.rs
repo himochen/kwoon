@@ -106,6 +106,16 @@ fn doctor(config_dir: Option<PathBuf>, only: Option<&String>) -> Result<bool, St
         let home = PathBuf::from(home);
         protected.push(home.join(".config/gh"));
         protected.push(home.join(".git-credentials"));
+        // The operator's own harness homes are never bound (plan D5): a run must not
+        // read their credentials or change the hooks of the operator's next session.
+        protected.push(home.join(".claude"));
+        protected.push(home.join(".claude.json"));
+        protected.push(home.join(".codex"));
+    }
+    for moved in ["CLAUDE_CONFIG_DIR", "CODEX_HOME"] {
+        if let Some(dir) = env::var_os(moved).filter(|d| !d.is_empty()) {
+            protected.push(PathBuf::from(dir));
+        }
     }
     let host = Host {
         bwrap: settings.paths.bwrap.clone(),

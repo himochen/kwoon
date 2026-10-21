@@ -140,6 +140,7 @@ fn check_in(host: &Host, harness: &Harness, run: &RunDir) -> Vec<Item> {
         run_clone: None,
         run_home: None,
         host_namespaces: Vec::new(),
+        host_devices: Vec::new(),
     };
     if let Err(why) =
         run_probe(&stage1, &request, &request_file).and_then(|report| expect_pid_namespace(&report))
@@ -179,6 +180,13 @@ fn check_in(host: &Host, harness: &Harness, run: &RunDir) -> Vec<Item> {
         run_home: Some(run.home.clone()),
         host_namespaces: match probe::namespace_identities() {
             Ok(ids) => ids,
+            Err(err) => {
+                let why = format!("stage 2 (filesystem setup): {err}");
+                return finish(Stages::Failed(why), None, config_clean, None);
+            }
+        },
+        host_devices: match probe::mount_devices() {
+            Ok(devices) => devices,
             Err(err) => {
                 let why = format!("stage 2 (filesystem setup): {err}");
                 return finish(Stages::Failed(why), None, config_clean, None);

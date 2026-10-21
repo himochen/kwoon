@@ -222,6 +222,13 @@ fn doctor_with_added_writable_bind(dest: &str) -> (Fixture, Run) {
     let fixture = Fixture::new();
     let source = fixture.root.join("host-dir");
     fs::create_dir(&source).unwrap();
+    let run = doctor_with_writable_bind_of(&fixture, &source, dest);
+    (fixture, run)
+}
+
+/// Runs the doctor with a writable bind of `source` at `dest` added to stage 2 and
+/// declared writable in the probe request.
+fn doctor_with_writable_bind_of(fixture: &Fixture, source: &Path, dest: &str) -> Run {
     let log = fixture.spy(&format!("add-writable {} {dest}", source.display()));
     let run = fixture.doctor(&fixture.harness("ok"));
     let log = fs::read_to_string(log).unwrap();
@@ -229,7 +236,55 @@ fn doctor_with_added_writable_bind(dest: &str) -> (Fixture, Run) {
         log.contains(&format!("[--bind] [{}] [{dest}]", source.display())),
         "{log}"
     );
-    (fixture, run)
+    run
+}
+
+/// The filesystem type of the mount holding `path`, from this process's mount table.
+fn filesystem_of(path: &Path) -> String {
+    let path = path.canonicalize().unwrap();
+    let table = fs::read_to_string("/proc/self/mountinfo").unwrap();
+    let mut best: Option<(usize, String)> = None;
+    for line in table.lines() {
+        let fields: Vec<&str> = line.split(' ').collect();
+        let point = Path::new(fields[4]);
+        let dash = fields.iter().position(|f| *f == "-").unwrap();
+        if path.starts_with(point)
+            && best
+                .as_ref()
+                .is_none_or(|(len, _)| point.as_os_str().len() >= *len)
+        {
+            best = Some((point.as_os_str().len(), fields[dash + 1].to_string()));
+        }
+    }
+    best.unwrap().1
+}
+
+#[test]
+fn a_host_tmpfs_bound_over_tmp_is_refused() {
+    // Review R3, item B: a host directory on tmpfs has the filesystem type bubblewrap's
+    // own /tmp has. Only a filesystem bubblewrap created inside may stand in for it.
+    let shm = Path::new("/dev/shm");
+    assert_eq!(
+        filesystem_of(shm),
+        "tmpfs",
+        "this test needs /dev/shm on tmpfs"
+    );
+    let source = tempfile::tempdir_in(shm).unwrap();
+    let fixture = Fixture::new();
+    let run = doctor_with_writable_bind_of(&fixture, source.path(), "/tmp");
+    let hides = run.item("wrapper-hides-state");
+    assert!(
+        hides.starts_with("not provided: ")
+            && hides.contains(
+                "mounts: /tmp is not a filesystem bubblewrap created: the host has it mounted"
+            ),
+        "{hides}"
+    );
+    assert!(run.item("harness-starts-in-wrapper").starts_with("unknown"));
+    assert_eq!(run.code, 1);
+    // The control: bubblewrap's own --tmpfs /tmp still passes.
+    let fixture = Fixture::new();
+    fixture.doctor(&fixture.harness("ok")).assert_verified();
 }
 
 #[test]
@@ -851,6 +906,7 @@ fn the_probe_detects_each_exposure_in_a_leaky_sandbox() {
         "run_clone": null,
         "run_home": null,
         "host_namespaces": [],
+        "host_devices": [],
     });
     // The fixture root is bound at its own path below, so the probe reads this file there.
     let request_file = fixture.root.join("request.json");

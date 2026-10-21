@@ -64,12 +64,16 @@ pub struct Request {
     pub run_home: Option<PathBuf>,
     /// The host's namespace identities, by name, to tell which ones the wrapper created.
     pub host_namespaces: Vec<(String, u64)>,
+    /// The device id ("major:minor") of every filesystem in the host's mount table. A
+    /// mount whose filesystem is among them is not one bubblewrap created.
+    pub host_devices: Vec<String>,
 }
 
 /// Mounts bubblewrap makes itself, each with the filesystem it must have: its root,
 /// `/tmp` and `/dev` are fresh tmpfs, holding nothing of the host's files, and `/dev/pts`
-/// a fresh devpts instance. They are recognised by destination and filesystem
-/// together, so a host directory bound at one of these destinations is refused.
+/// a fresh devpts instance. They are recognised by destination, filesystem type, and
+/// a filesystem instance absent from the host's mount table, so a host directory
+/// bound at one of these destinations is refused, even one on tmpfs.
 const BUBBLEWRAP_MOUNTS: [(&str, &str); 4] = [
     ("/", "tmpfs"),
     ("/tmp", "tmpfs"),
@@ -235,6 +239,20 @@ struct Mount {
     point: PathBuf,
     read_only: bool,
     fs_type: String,
+    /// The filesystem's device id, "major:minor".
+    device: String,
+}
+
+/// The device id of every filesystem in this process's mount table, for the request.
+pub fn mount_devices() -> Result<Vec<String>, String> {
+    let mut devices: Vec<String> = read_mountinfo()
+        .map_err(|err| format!("cannot read the host's mount table: {err}"))?
+        .into_iter()
+        .map(|m| m.device)
+        .collect();
+    devices.sort();
+    devices.dedup();
+    Ok(devices)
 }
 
 fn read_mountinfo() -> io::Result<Vec<Mount>> {
@@ -258,6 +276,7 @@ fn read_mountinfo() -> io::Result<Vec<Mount>> {
             point: PathBuf::from(unescape(fields[4])),
             read_only: fields[5].split(',').any(|opt| opt == "ro"),
             fs_type: fs_type.to_string(),
+            device: fields[2].to_string(),
         });
     }
     Ok(mounts)
@@ -384,18 +403,30 @@ fn check_mounts(request: &Request, mounts: &io::Result<Vec<Mount>>) -> Check {
             },
         }
     }
-    // bubblewrap's own mounts must have their own characteristics wherever they appear.
+    // bubblewrap's own mounts must have their own characteristics wherever they appear,
+    // and be filesystems it created: none the host has mounted.
+    if request.host_devices.is_empty() {
+        problems.push("the host's mount table is missing from the request".into());
+    }
+    let created = |mount: &Mount| !request.host_devices.contains(&mount.device);
     for mount in mounts {
         let point = mount.point.as_path();
-        if let Some((_, fs_type)) = BUBBLEWRAP_MOUNTS
+        let own = BUBBLEWRAP_MOUNTS
             .iter()
-            .find(|(p, _)| point == Path::new(p))
+            .find(|(p, _)| point == Path::new(p));
+        if let Some((_, fs_type)) = own
             && mount.fs_type != *fs_type
         {
             problems.push(format!("{} is not a {fs_type}", point.display()));
         }
         if point.starts_with("/proc") && mount.fs_type != "proc" {
             problems.push(format!("{} is not a proc mount", point.display()));
+        }
+        if (own.is_some() || point.starts_with("/proc")) && !created(mount) {
+            problems.push(format!(
+                "{} is not a filesystem bubblewrap created: the host has it mounted",
+                point.display()
+            ));
         }
         if DEVICE_NODES.iter().any(|p| point == Path::new(p)) {
             use std::os::unix::fs::FileTypeExt;
@@ -407,11 +438,12 @@ fn check_mounts(request: &Request, mounts: &io::Result<Vec<Mount>>) -> Check {
     }
     let writable_allowed = |mount: &Mount| {
         let point = mount.point.as_path();
-        BUBBLEWRAP_MOUNTS
+        (BUBBLEWRAP_MOUNTS
             .iter()
             .any(|(p, fs_type)| point == Path::new(p) && mount.fs_type == *fs_type)
+            && created(mount))
             || DEVICE_NODES.iter().any(|p| point == Path::new(p))
-            || (point.starts_with("/proc") && mount.fs_type == "proc")
+            || (point.starts_with("/proc") && mount.fs_type == "proc" && created(mount))
             || request.run_clone.as_deref() == Some(point)
             || request.run_home.as_deref() == Some(point)
     };
@@ -873,6 +905,7 @@ mod tests {
             run_clone: Some("/runs/1/clone".into()),
             run_home: Some("/runs/1/home".into()),
             host_namespaces: Vec::new(),
+            host_devices: vec!["8:1".into()],
         }
     }
 
@@ -932,11 +965,17 @@ mod tests {
     }
 
     fn mount(point: &str, read_only: bool) -> Mount {
-        let fs_type = if point == "/" { "tmpfs" } else { "ext4" };
+        // The root is bubblewrap's own tmpfs; the others are host filesystems.
+        let (fs_type, device) = if point == "/" {
+            ("tmpfs", "0:99")
+        } else {
+            ("ext4", "8:1")
+        };
         Mount {
             point: point.into(),
             read_only,
             fs_type: fs_type.into(),
+            device: device.into(),
         }
     }
 
@@ -999,6 +1038,55 @@ mod tests {
         };
         let check = check_mounts(&request, &Ok(vec![mount("/", false), mount("/etc", true)]));
         assert_eq!(check.detail, "/usr is not bound");
+    }
+
+    #[test]
+    fn bubblewraps_own_mounts_must_be_filesystems_the_host_lacks() {
+        // Review R3, item B: the same type is not enough; the instance must be new.
+        let request = Request {
+            mounts: vec![
+                declared("/", Access::Any),
+                declared("/tmp", Access::Any),
+                declared("/usr", Access::ReadOnly),
+                declared("/etc", Access::ReadOnly),
+            ],
+            ..empty_request()
+        };
+        let tmp = |device: &str| Mount {
+            point: "/tmp".into(),
+            read_only: false,
+            fs_type: "tmpfs".into(),
+            device: device.into(),
+        };
+        let layout = |tmp_mount| {
+            let mounts = vec![
+                mount("/", false),
+                tmp_mount,
+                mount("/usr", true),
+                mount("/etc", true),
+            ];
+            check_mounts(&request, &Ok(mounts))
+        };
+        let fresh = layout(tmp("0:77"));
+        assert!(fresh.ok, "{}", fresh.detail);
+        let host = layout(tmp("8:1"));
+        assert_eq!(
+            host.detail,
+            "/tmp is not a filesystem bubblewrap created: the host has it mounted; \
+             /tmp is writable, but only the run clone and the run home may be"
+        );
+        // Without the host's table, nothing counts as created.
+        let no_table = Request {
+            host_devices: Vec::new(),
+            ..request.clone()
+        };
+        let mounts = vec![
+            mount("/", false),
+            tmp("0:77"),
+            mount("/usr", true),
+            mount("/etc", true),
+        ];
+        assert!(!check_mounts(&no_table, &Ok(mounts)).ok);
     }
 
     #[test]

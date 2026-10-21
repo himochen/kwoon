@@ -66,9 +66,26 @@ pub struct Request {
     pub host_namespaces: Vec<(String, u64)>,
 }
 
-/// Mounts that bubblewrap itself makes writable: its root and `/tmp` tmpfs, and its
-/// `/dev`. They hold nothing of the host's files.
-const BUBBLEWRAP_WRITABLE: [&str; 3] = ["/", "/tmp", "/dev"];
+/// Mounts bubblewrap makes itself, each with the filesystem it must have: its root,
+/// `/tmp` and `/dev` are fresh tmpfs, holding nothing of the host's files, and `/dev/pts`
+/// a fresh devpts instance. They are recognised by destination and filesystem
+/// together, so a host directory bound at one of these destinations is refused.
+const BUBBLEWRAP_MOUNTS: [(&str, &str); 4] = [
+    ("/", "tmpfs"),
+    ("/tmp", "tmpfs"),
+    ("/dev", "tmpfs"),
+    ("/dev/pts", "devpts"),
+];
+/// The host device nodes bubblewrap binds into its `/dev`; each must be a character
+/// device.
+const DEVICE_NODES: [&str; 6] = [
+    "/dev/null",
+    "/dev/zero",
+    "/dev/full",
+    "/dev/random",
+    "/dev/urandom",
+    "/dev/tty",
+];
 /// Trees that must be bound, read-only, in every layout (plan D5, "Mounts").
 const READ_ONLY_SYSTEM: [&str; 2] = ["/usr", "/etc"];
 /// Variables that must never be set inside the wrapper, whoever declared them (plan D5:
@@ -206,6 +223,7 @@ fn check(name: &str, problems: Vec<String>) -> Check {
 struct Mount {
     point: PathBuf,
     read_only: bool,
+    fs_type: String,
 }
 
 fn read_mountinfo() -> io::Result<Vec<Mount>> {
@@ -214,15 +232,21 @@ fn read_mountinfo() -> io::Result<Vec<Mount>> {
     for line in io::BufReader::new(file).lines() {
         let line = line?;
         let fields: Vec<&str> = line.split(' ').collect();
-        if fields.len() < 6 {
+        // The optional fields end at "-"; the filesystem type follows it.
+        let fs_type = fields
+            .iter()
+            .position(|f| *f == "-")
+            .and_then(|dash| fields.get(dash + 1));
+        let (Some(fs_type), true) = (fs_type, fields.len() >= 6) else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "short mountinfo line",
             ));
-        }
+        };
         mounts.push(Mount {
             point: PathBuf::from(unescape(fields[4])),
             read_only: fields[5].split(',').any(|opt| opt == "ro"),
+            fs_type: fs_type.to_string(),
         });
     }
     Ok(mounts)
@@ -349,15 +373,39 @@ fn check_mounts(request: &Request, mounts: &io::Result<Vec<Mount>>) -> Check {
             },
         }
     }
-    let writable_allowed = |point: &Path| {
-        BUBBLEWRAP_WRITABLE.iter().any(|p| point == Path::new(p))
-            || point.starts_with("/dev")
-            || point.starts_with("/proc")
+    // bubblewrap's own mounts must have their own characteristics wherever they appear.
+    for mount in mounts {
+        let point = mount.point.as_path();
+        if let Some((_, fs_type)) = BUBBLEWRAP_MOUNTS
+            .iter()
+            .find(|(p, _)| point == Path::new(p))
+            && mount.fs_type != *fs_type
+        {
+            problems.push(format!("{} is not a {fs_type}", point.display()));
+        }
+        if point.starts_with("/proc") && mount.fs_type != "proc" {
+            problems.push(format!("{} is not a proc mount", point.display()));
+        }
+        if DEVICE_NODES.iter().any(|p| point == Path::new(p)) {
+            use std::os::unix::fs::FileTypeExt;
+            let is_device = fs::metadata(point).is_ok_and(|m| m.file_type().is_char_device());
+            if !is_device {
+                problems.push(format!("{} is not a character device", point.display()));
+            }
+        }
+    }
+    let writable_allowed = |mount: &Mount| {
+        let point = mount.point.as_path();
+        BUBBLEWRAP_MOUNTS
+            .iter()
+            .any(|(p, fs_type)| point == Path::new(p) && mount.fs_type == *fs_type)
+            || DEVICE_NODES.iter().any(|p| point == Path::new(p))
+            || (point.starts_with("/proc") && mount.fs_type == "proc")
             || request.run_clone.as_deref() == Some(point)
             || request.run_home.as_deref() == Some(point)
     };
     for mount in mounts.iter().filter(|m| !m.read_only) {
-        if !writable_allowed(&mount.point) {
+        if !writable_allowed(mount) {
             problems.push(format!(
                 "{} is writable, but only the run clone and the run home may be",
                 mount.point.display()
@@ -838,9 +886,11 @@ mod tests {
     }
 
     fn mount(point: &str, read_only: bool) -> Mount {
+        let fs_type = if point == "/" { "tmpfs" } else { "ext4" };
         Mount {
             point: point.into(),
             read_only,
+            fs_type: fs_type.into(),
         }
     }
 

@@ -11,6 +11,10 @@
 #   no-cgroup           do not ask for a cgroup namespace
 #   writable <dir>      for stage 2, bind <dir> writable instead of read-only, and edit
 #                       the probe request so that it declares the bind writable too
+#   add-writable <src> <dest>
+#                       for stage 2, add a writable bind of <src> at <dest>, right after
+#                       bubblewrap's own /tmp, and edit the probe request so that it
+#                       declares <dest> writable
 #   swap-home <target>  after the harness (stage 3) exits, replace the run home with a
 #                       symbolic link to <target>, as a host process could
 set -u
@@ -56,7 +60,7 @@ in_test_context() {
     [ -n "$state" ] && [ "$(/usr/bin/cat "$state/classification" 2>/dev/null)" = test ]
 }
 
-if [ "$stage" = 2 ] && { [ "$mode" = report ] || [ "$mode" = writable ]; }; then
+if [ "$stage" = 2 ] && { [ "$mode" = report ] || [ "$mode" = writable ] || [ "$mode" = add-writable ]; }; then
     if ! in_test_context "$@"; then
         echo "bwrap-spy: refusing to change stage 2 outside a test context" >&2
         exit 1
@@ -91,6 +95,23 @@ writable)
             previous="$arg"
         done
         /usr/bin/sed -i "s|{\"mount_point\":\"$target\",\"access\":\"read-only\"|{\"mount_point\":\"$target\",\"access\":\"writable\"|" "$request"
+    fi
+    ;;
+add-writable)
+    if [ "$stage" = 2 ]; then
+        source=${target%% *}
+        dest=${target#* }
+        # Right after bubblewrap's own /tmp, before the binds made beneath it.
+        request=""
+        previous=""
+        for arg do
+            shift
+            if [ "$arg" = /.kwoon-probe-request ] && [ -z "$request" ]; then request="$previous"; fi
+            set -- "$@" "$arg"
+            if [ "$previous:$arg" = --tmpfs:/tmp ]; then set -- "$@" --bind "$source" "$dest"; fi
+            previous="$arg"
+        done
+        /usr/bin/sed -i "s|\"mounts\":\[|\"mounts\":[{\"mount_point\":\"$dest\",\"access\":\"writable\",\"optional\":false},|" "$request"
     fi
     ;;
 no-cgroup)

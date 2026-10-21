@@ -592,6 +592,52 @@ fn a_writable_installation_mount_fails_even_when_declared() {
     assert_eq!(run.code, 1);
 }
 
+/// Runs the doctor with a writable bind of a host directory at `dest` added to stage 2
+/// and declared writable in the probe request.
+fn doctor_with_added_writable_bind(dest: &str) -> (Fixture, Run) {
+    let fixture = Fixture::new();
+    let source = fixture.root.join("host-dir");
+    fs::create_dir(&source).unwrap();
+    let log = fixture.spy(&format!("add-writable {} {dest}", source.display()));
+    let run = fixture.doctor(&fixture.harness("ok"));
+    let log = fs::read_to_string(log).unwrap();
+    assert!(
+        log.contains(&format!("[--bind] [{}] [{dest}]", source.display())),
+        "{log}"
+    );
+    (fixture, run)
+}
+
+#[test]
+fn a_writable_host_bind_under_dev_is_refused() {
+    // Review R2, finding 3: /dev holds only bubblewrap's own nodes, by their mount
+    // characteristics, not any mount whose destination is under /dev.
+    let (_fixture, run) = doctor_with_added_writable_bind("/dev/kwoon-host");
+    let hides = run.item("wrapper-hides-state");
+    assert!(
+        hides.starts_with("not provided: ")
+            && hides.contains(
+                "mounts: /dev/kwoon-host is writable, but only the run clone and the run home may be"
+            ),
+        "{hides}"
+    );
+    assert!(run.item("harness-starts-in-wrapper").starts_with("unknown"));
+    assert_eq!(run.code, 1);
+}
+
+#[test]
+fn a_host_bind_over_tmp_is_refused() {
+    // /tmp must be bubblewrap's own empty tmpfs, not a host directory laid over it.
+    let (_fixture, run) = doctor_with_added_writable_bind("/tmp");
+    let hides = run.item("wrapper-hides-state");
+    assert!(
+        hides.starts_with("not provided: ") && hides.contains("mounts: /tmp is not a tmpfs"),
+        "{hides}"
+    );
+    assert!(run.item("harness-starts-in-wrapper").starts_with("unknown"));
+    assert_eq!(run.code, 1);
+}
+
 #[test]
 fn a_forbidden_variable_fails_even_when_declared() {
     // Review R1, finding 6: host settings make the builder set, and so declare, these.

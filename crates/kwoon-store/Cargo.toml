@@ -1,0 +1,8 @@
+[package]
+name = "kwoon-store"
+description = "The event store, which hides its engine."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true

@@ -1476,21 +1476,41 @@ it.
     started in the wrapper with a private run home (T1);
   - the lock scope of D1 for runs: lock to record the launch, no lock while the agent
     works, lock again for the result;
-  - the `run` record with launcher-stamped identity: harness, session, model and effort
-    requested, provider account as an opaque id, family from the policy;
-  - the observed model as #18 decides: the per-turn models from the harness's log when
-    the launch-time check shows the run cannot write it, otherwise the launch record;
+  - the `run` record with launcher-stamped harness, session, requested model and effort,
+    and provider account as an opaque id; the harness binary digest; the launch-time
+    log-protection result (`passed`, `failed`, `not run`); the evidence mode
+    (`protected-log`, `launch-record`); and the family of each observed identity from the
+    policy;
+  - the launch-time protection check at the actual session-log location, under the
+    confinement applying to the run’s tools. `passed` requires a successful harness-side
+    write control, a canary denied by that confinement, and protection covering every tool
+    capable of modifying or replacing the log. A successful tool-side write gives
+    `failed`; an unavailable probe, unrelated write error, or inability to establish the
+    required conditions gives `not run`;
+  - separate recording of per-turn reported models and every reported fallback or
+    downgrade, without overwriting the requested model. Reports remain unverified in
+    `launch-record` mode;
+  - observed identities for policy evaluation: `protected-log` applies only after `passed`
+    and uses only logged per-turn models. Otherwise `launch-record` applies: each turn
+    uses the requested model unless downgraded to `unknown`. A mismatch, fallback, or
+    downgrade makes the affected turn `unknown`; an event that cannot be assigned to
+    particular turns makes the run’s observed-model collection `unknown`. The log cannot
+    establish a replacement identity or restore a downgraded identity.
   - kwoon's own capture of the output;
   - a `verdict` record parsed from one final JSON block that kwoon asks for. An output
     that cannot be parsed gives `unknown`;
   - `finding` records. The prompt lists earlier findings with their ids, so the review
     can report `persists` or `fixed` against an id. kwoon validates every id it is given.
-- **Acceptance rows:** G9 [a review whose model is unknown is rejected]. kwoon records
-  `unknown` and never infers a model from the run's output. The gate side of G9 is in
-  T10.
+- **Acceptance rows:** G3, G9 [protection-check results]; G9, G20 [model evidence,
+  reported fallbacks, and missing evidence]. T7 owns the check and `run`-record assertions
+  and never infers identity from the run’s output. T10 owns gate rejection and replay; T15
+  owns handoff actions and disclosure.
 - **Check first:**
   - The spec revision in #18 has merged.
-  - How each harness reports fallback events [to verify in T7].
+  - How each supported harness reports serving models per turn and every fallback or
+    downgrade, and whether the wrapper can protect its session log from every
+    write-capable tool while allowing harness writes, with the harness’s inner sandbox off
+    [to verify in T7].
   - Still to verify 3, in part: which fields the harness's log reports for the observed
     model and the session id, per harness, and whether kwoon can set the session id at
     launch.
@@ -1513,17 +1533,24 @@ it.
     - **lock scope.** While a review run blocks on a signal from the test, `kwoon poll`
       and `kwoon answer` both complete within 30 seconds.
     - **Model identity (#18).** Each case uses its own fixture:
-      - the session log is writable by the run: identity comes from the launch record,
-        a log claiming another model can only downgrade it to `unknown`, and the `run`
-        record says which evidence applied;
-      - the session log is not writable: the per-turn models from the log are recorded;
+      - a successful tool-side canary records `failed` and `launch-record`. A matching log
+        leaves the requested identity standing. For requested model A and reported model
+        B, A remains requested, B is retained as unverified data, and the affected turn’s
+        policy identity is `unknown`. A turn-bound fallback or downgrade makes that turn
+        `unknown`; an unassignable event makes the run’s collection `unknown`. Later
+        reports cannot restore identity or supply a known family for an unknown one;
+      - a canary denied by the checked confinement, with a successful harness-side write
+        control and every write-capable tool covered, records `passed` and
+        `protected-log`; logged per-turn models supply the observed identities.
       - one turn is served by a different model, such as a safety fallback: T7 records
         the per-turn models and fallback without folding the fallback into the
         requested value. T10 verifies that a policy naming the requested model is not
         satisfied. T15 verifies that the fallback is shown in the handoff, using a
         separate fixture whose policy permits every observed model so that handoff can
         occur;
-      - the launch-time check cannot be run: the log is treated as writable.
+      - an invalid session-log path, unavailable probe, unrelated write error, or
+        write-capable tool outside the checked protection records `not run` and
+        `launch-record`, never `passed`.
   - Live, run by the operator: one review run per supported harness on the test
     repository.
 - **Depends on:** M1, T1, T4, T8, T22; the spec revision in #18.

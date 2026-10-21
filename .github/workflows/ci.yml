@@ -11,8 +11,11 @@ permissions:
 jobs:
   rust:
     # The wrapper tests need unprivileged user and PID namespaces. A denied namespace
-    # fails the tests; it is never skipped (plan T1).
-    runs-on: ubuntu-24.04
+    # fails the tests; it is never skipped (plan T1). GitHub's ubuntu-24.04 runner denies
+    # them (kernel.apparmor_restrict_unprivileged_userns = 1; bubblewrap reports
+    # "loopback: Failed RTM_NEWADDR: Operation not permitted"), so this job runs on
+    # ubuntu-22.04, which allows them.
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:

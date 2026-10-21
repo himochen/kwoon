@@ -601,16 +601,17 @@ fn each_stage_failure_is_reported_with_its_stage() {
     // A successful real invocation of all three stages comes first.
     fixture.doctor(&fixture.harness("ok")).assert_verified();
 
-    // Stage 1: the user namespace is denied. The outer bubblewrap leaves kwoon in a user
-    // namespace that may not create another one.
+    // Stage 1: the user namespace is denied. kwoon runs in a user namespace whose limit
+    // on nested user namespaces is 0, which needs no privilege and no particular
+    // bubblewrap version.
     fixture.write_settings(&fixture.harness("ok"));
-    let mut command = Command::new("bwrap");
+    let mut command = Command::new("unshare");
     command.args([
-        "--unshare-user",
-        "--disable-userns",
-        "--dev-bind",
-        "/",
-        "/",
+        "--user",
+        "--map-root-user",
+        "sh",
+        "-c",
+        "echo 0 > /proc/sys/user/max_user_namespaces && exec \"$0\" \"$@\"",
         KWOON,
     ]);
     fixture.prepare(&mut command);

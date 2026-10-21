@@ -203,7 +203,7 @@ it when available.
 | G6 | Tampering with history is detectable. | Degradable | Degraded: detectable up to the last checkpoint kwoon pushed to the policy repository. | A forge that refuses force pushes to the checkpoint branch keeps those checkpoints safe. |
 | G7 | External actions are neither repeated nor lost across crashes. | Floor | Intent, action, and confirmation are recorded separately, with stable ids. "External actions" lists every external write kwoon makes, each with its recovery rule. | None needed. |
 | G8 | Rulings and policy live in git and can be reviewed. | Floor | The policy is in the policy repository. Before a ruling (see "Policy v1") takes effect, kwoon commits it to the policy repository's checkpoint branch in the host's clone and verifies the commit. The next checkpoint push carries it off the host. | None needed. |
-| G9 | Reviews meet the policy's independence and count; an author never reviews its own change. | Degradable (only along the policy's fallback chain) | Judged from launcher-stamped identities (session, harness, model, family, provider account), never from forge user names. | None needed. |
+| G9 | Reviews meet the policy's independence and count; an author never reviews its own change. | Degradable (only along the policy's fallback chain) | Judged from launcher-stamped identities (session, harness, provider account) and from the family of every model observed in each run, with the model evidence that applied (see "Observed models" under "Evidence contract v1"), never from forge user names. | None needed. |
 | G10 | A verdict carries over only when the system can vouch for the change. | Floor | Strictest form: never carried over. A new head needs a new review. | None needed. |
 | G11 | Only a non-LLM party merges, and the gate is re-evaluated at merge time. | Degradable | Degraded. kwoon does not merge in the MVP. Only kwoon hands off. It re-evaluates handed-off pull requests on every poll and turns one back into a draft when the gate fails. A merge between a change of facts and the next poll is caught afterwards by the audit and post-merge tracking. | A forge rule that blocks merging when the head changed after approval. |
 | G12 | A change at risk of conflicting with the target branch is tested on the merged result first. | Tunable | When files the pull request changed were also changed on the target branch since their merge base, the head must contain the target tip before handoff. Otherwise it is handed off without syncing, and post-merge tracking is the fallback. A circuit breaker switches to "always sync" when the target turns red too often. | A forge rule requiring branches to be up to date. |
@@ -254,7 +254,7 @@ Kinds:
 | Kind | What it records | Key fields |
 |---|---|---|
 | `policy` | A policy commit the operator accepted. | policy repository; commit; previous accepted commit; result of the floor check |
-| `run` | One agent run. | role; task; harness; session id; provider account (opaque id); model requested and observed; family; effort requested and observed; context-compaction window; start and end; outcome; log digest; for an authoring run, the publication repository and head branch and the governed repository and base branch, all fixed at launch from host settings, the start head, and the final head |
+| `run` | One agent run. | role; task; harness; session id; provider account (opaque id); model requested; harness binary digest; result of the launch-time log-protection check (`passed`, `failed`, `not run`); model evidence that applied (`protected-log` or `launch-record`); reported models per turn and every reported fallback or downgrade, retained as unverified data in `launch-record` mode; observed identities used for policy evaluation, per turn, or `unknown` for the run when unavailable; family of each observed identity; effort requested and observed; context-compaction window; start and end; outcome; log digest; for an authoring run, the publication repository and head branch and the governed repository and base branch, all fixed at launch from host settings, the start head, and the final head |
 | `push` | One push to a pull request branch, made by kwoon or observed on the forge. | repository; branch; old head (expected by kwoon, or seen on the forge; `absent` for a new branch); new head; publisher (`kwoon`, or `unknown` for an observed push); author run (the run whose clone kwoon published from, or `unknown`); pull request, or `none` when the push came first. A later `action` record links such a push to its pull request; the `push` record is never edited. |
 | `verdict` | A review result. | review run; repository; pull request; head and base commits; result (`approve`, `request_changes`, `unknown`); finding ids |
 | `finding` | One reported problem. | stable id; pull request; category; severity; status (`open`, `fixed`, `persists`, `dismissed` with a reason); first and last run that saw it |
@@ -275,11 +275,51 @@ Rules:
 
 - **Identity comes from the launcher and the harness's own logs, never from the run's
   output, and never from the forge.**
-  - kwoon records the harness, session, model, effort, and provider account when it
-    starts a run.
-  - Afterwards, it records the model and the actions it observes in the harness's log.
+  - kwoon records the harness, the harness binary's digest, session, model, effort, and
+    provider account when it starts a run.
+  - Afterwards, it records the actions it observes in the harness's log, and the
+    observed models as "Observed models" below allows.
   - A field neither source gives is `unknown`, and an `unknown` never satisfies a policy
     requirement.
+- **Observed models: the log is evidence only when the run cannot write it.** A run's
+  tools execute as the same operating-system user as the harness, so a log they can
+  rewrite cannot establish which model served the run.
+  - **Protection check.** At launch, kwoon attempts a canary write into the actual
+    session-log location under the confinement that will apply to the run's tools. The
+    result is `passed` only when kwoon verifies that the location is writable by the
+    harness, that the canary was denied by that confinement, and that every tool capable
+    of modifying or replacing the log is subject to the checked protection. A successful
+    write gives `failed`. An unavailable probe, an unrelated write error, or an inability
+    to establish those conditions gives `not run`. The `run` record retains the result.
+  - **Protected log.** When the check passed, the evidence is `protected-log`. Only the
+    log's per-turn model reports supply observed identities. The requested model never
+    substitutes for a missing observed identity in this mode.
+  - **Launch-record fallback.** When the check failed or was not run, the evidence is
+    `launch-record`: the requested model and the harness binary's digest. Each turn's
+    identity for policy evaluation is the requested model unless downgraded to
+    `unknown`. A logged mismatch or reported fallback or downgrade makes the affected
+    turn's identity `unknown`. If an event cannot be assigned to particular turns, the
+    run's observed-model collection is `unknown`. The log cannot establish another
+    identity or restore an identity after downgrading it. Retain its reported models and
+    events separately as unverified data.
+  - **Residual risk.** In the launch-record fallback, a run that rewrites the log can
+    hide a fallback: the requested model then stands although another model served some
+    turns. The `run` record states which evidence applied, and the handoff shows it, so
+    the merger sees the weaker evidence.
+- **Fallbacks are always recorded.** Retain the per-turn model reports and every
+  fallback or downgrade the harness reports, for example a safety mechanism switching a
+  turn from Opus 5.5 to Opus 4.8, separately from the observed-model identities used for
+  policy evaluation. In `launch-record` mode, those reports remain unverified even when
+  they name a model. Record and display reported fallbacks without overwriting the
+  requested model. In the rules below, "observed models" means the identities permitted
+  by the evidence mode above.
+  - In either evidence mode, a missing or malformed model entry makes that turn's
+    observed identity `unknown`. An empty, malformed, or unreadable log makes the run's
+    observed-model collection `unknown`, not an empty collection. A model requirement is
+    satisfied only when the collection contains at least one turn, every turn has a known
+    identity, and every turn satisfies the requirement. Unknown evidence needed by the
+    gate fails it and raises a question under G20.
+  - G9 evaluates the family of every observed model (gate step 5).
 - **Identities are kept apart.** A forge principal, a provider account, a session, and
   the operator are different things. The independence rules below say which one each
   option compares.
@@ -366,7 +406,7 @@ floor guarantee.
 
 | Option | Values | Notes |
 |---|---|---|
-| Governed repositories | Repository, target branch, the reviewers to request at handoff, and whether to post the handoff comment | Per repository. |
+| Governed repositories | Repository, target branch, the reviewers to request at handoff, and whether to include checks and approvals in the handoff comment | Per repository. |
 | Review independence | `fresh-session`, `cross-model`, or `cross-family`, plus an ordered fallback chain | Missing capability and no fallback: refuse to start (G19). |
 | Review count | 1 or more | Counted as distinct review runs. |
 | Round limit | 1 or more | Past the limit, the gate fails and asks the operator. |
@@ -436,10 +476,16 @@ cannot read gives `unknown`, and `unknown` fails with its reason (G20).
    - **Independence**: each counted review run meets the effective rule against every
      author run of the pull request:
      - `fresh-session`: a different session;
-     - `cross-model`: also a different model;
-     - `cross-family`: also a different family.
+     - `cross-model`: also no observed model in common;
+     - `cross-family`: also no observed family in common.
 
-     A run never reviews a change it authored.
+     `cross-model` and `cross-family` compare every observed model of the review run
+     with every observed model of each author run, as defined under "Observed models"
+     (see "Evidence contract v1"). An `unknown` model or family on either side fails
+     these two rules. Independently of the selected independence rule, a review run
+     whose observed-model collection or any turn's observed model is `unknown` is
+     ineligible, including under `fresh-session`. A run never reviews a change it
+     authored.
    - **Findings**: no finding at or above the policy's blocking severity is `open` or
      `persists`.
 6. **Rounds (G15)**: a round is a distinct head that received at least one verdict. The
@@ -465,8 +511,12 @@ When the gate passes, kwoon hands off:
 
 1. It writes the `gate` record and an `action` intent.
 2. It marks the pull request ready for review and requests the reviewers the policy
-   lists. If the policy says so, it also posts one comment that summarizes the gate
-   record for the merger: checks, review runs with model and family, and approvals.
+   lists. It posts one handoff comment showing, for every author and review run used by
+   the gate, the requested model, observed models and families, every reported fallback
+   or downgrade, and the model evidence that applied. Reports from `launch-record` mode
+   are labeled unverified and distinguished from identities used by the gate. If the
+   policy requests the full gate summary, the same comment also includes checks and
+   approvals.
 3. It writes the `handoff` record.
 
 After a handoff, kwoon re-runs the gate on every poll. When a step fails, kwoon turns the
@@ -594,9 +644,11 @@ writes its `run` record.
 context-compaction window where the harness allows it, through the harness's
 command-line options, settings files in the run's clone, or environment variables inside
 the wrapper. It records both the requested and the observed value, the observed one from
-the harness's own log. It is still to verify which of these levers each supported
-harness offers per run, and which values its log reports. A value the harness does not
-report is recorded as `unknown`.
+the harness's own log; for the model, only as "Observed models" under "Evidence contract
+v1" allows. It is still to verify which of these levers each supported
+harness offers per run, and which values its log reports. For reasoning effort and the
+context-compaction window, a value the harness does not report is recorded as `unknown`.
+Model identity follows "Observed models" under "Evidence contract v1".
 
 ## Post-merge tracking
 
@@ -728,6 +780,11 @@ Both kinds run in the **isolated verification context**:
 | G7 | For each operation in "External actions", kwoon is killed after the forge or git remote accepts the request but before kwoon records it: marking a pull request ready, turning it back into a draft, requesting reviewers, posting the handoff comment, pushing a run's commits, opening a draft pull request, pushing a checkpoint, re-running a cancelled acceptance run, and starting a missing one. After restart, it records each action once, and repeats none: no second comment, no second push, no second pull request, no second checkpoint, no second re-run, and no second start. Two more re-run cases: after the crash the run cannot be read, so kwoon records `unknown`, raises a question, and re-runs nothing; and someone else started another run on a commit that contains the covered merges while the re-run's attempt is unchanged, so kwoon records that run as its own `check` evidence, records the re-run `unknown`, and raises a question. Two more reviewer-request cases: a requested reviewer submits a review before the restart, so they left the requested list, and kwoon does not request them again while requesting a reviewer with no per-reviewer intent once, after obtaining a complete history read and writing that reviewer's intent; and the review-request history cannot be read, so kwoon records `unknown`, raises a question, and requests nobody. Reviewer-request recovery also covers a removed request, unequal host and forge clocks, incomplete pagination, and an attempted request without a conclusive history match. No attempted request repeats automatically; unresolved intents become `unknown` and raise a question. A reviewer with no per-reviewer intent is requested once. A crash after writing a per-reviewer intent but before submission leaves no new matching event. On restart, kwoon records that intent as `unknown`, raises a question, and does not submit its request automatically. | Deterministic and live |
 | G8 | A policy that exists only in the store and not in git: `kwoon doctor` refuses to start. An `answer` dismisses a blocking finding and an `approval` covers a policy-layer path. When the local archive commit fails, the gate still fails on both. When the remote cannot be reached but the local archive succeeds, the gate passes, and the next checkpoint push carries both rulings. kwoon is killed after the archive commit but before the `archive` record: after restart, it records the existing commit and commits nothing twice. | Deterministic |
 | G9 | Each of these is rejected: a review from the author's own session; a review whose model is unknown; a same-family review on a `cross-family` path. Two verdicts from one review run count once. | Deterministic |
+| G9, G20 | The log-protection check passes and every logged turn ran on the requested model: the run's model satisfies policy. In both fallback fixtures, the log-protection check has passed and the effective independence rule is `cross-family`. In the rejection fixture, this is the only review and one turn falls back to a model of the author's family: the review is rejected, the gate fails, the `run` record retains the fallback, and no handoff occurs. In the separate passing fixture, the review's original and fallback models both belong to families absent from every author run, and all other gate prerequisites pass: the gate passes and the handoff summary shows the requested model, both observed models and their families, the fallback, and the evidence mode. Both cases run separately through the production entry point and assert the gate result, the exit code or check result, and the absence or presence of handoff actions. The canary write succeeds, or the check cannot be run: the evidence is `launch-record` and the check result is `failed` or `not run`. In that mode, a log that matches the requested model leaves it standing; a requested model of `unknown` family stays `unknown` although the log names a listed model. Requested model A with an unprotected log reporting model B for one turn: the record keeps A as requested and B as unverified reported data, and that turn's identity is `unknown`, so the review does not count. A fallback event bound to one turn makes that turn `unknown`; an event that cannot be assigned to a turn makes the run's observed-model collection `unknown`. Replay gives the same results and preserves the distinction between reported data and identities. | Deterministic |
+| G9, G20 | Missing model evidence, in each evidence mode: an empty log, a malformed log, and an unreadable log each make the run's observed-model collection `unknown`; a turn with a missing or malformed model field makes that turn `unknown`. Each fails a model requirement, the gate fails, and a question is raised; missing evidence never passes through an empty-set comparison, and in `protected-log` mode it is never filled from the requested model. A valid multi-turn log whose first and last turns satisfy a requirement but whose middle turn does not fails it; one whose every turn satisfies it passes. | Deterministic |
+| G9 | A review from a different session whose observed model is `unknown` is rejected under each of `fresh-session`, `cross-model`, and `cross-family`. Separately, a review with known models against an author run whose observed model is `unknown` is rejected under `cross-model` and `cross-family`. Any shared model across any reviewer and author turn pair fails `cross-model`, and any shared family fails `cross-family`; disjoint known sets pass when every other prerequisite holds. | Deterministic |
+| G9 | Handoff disclosure: with the policy's full gate summary turned off, a passing handoff still posts the handoff comment, and it shows, for both the author run and the review run, the requested model, the observed models and families, every reported fallback or downgrade, and the model evidence that applied. The fixture pairs a `protected-log` review run with a `launch-record` author run; the author run's reports are labeled unverified and kept apart from the identities the gate used. | Deterministic |
+| G3, G9 | Protection check: a canary denied by the run's confinement, with a successful harness-side write control, gives `passed`. A successful canary write from a tool gives `failed`. An invalid session-log path, an unavailable probe, an unrelated write error, or a write-capable tool outside the checked protection never gives `passed`. | Deterministic |
 | G10 | A new commit is pushed after an approval. The gate fails until a new review of the new head; if the pull request was handed off, it goes back to draft. | Deterministic and live |
 | G11 | The merger merges at a head kwoon did not hand off; the audit flags it. | Live |
 | G12 | The pull request and the target branch both changed file F since their merge base, and the head does not contain the target tip: the gate fails. Without a shared file, it passes without a sync. The breaker turns on and a "turn off" answer to its question is archived: the breaker is off. An answer to an activation that is already off, or that a new activation replaced, is refused. After a restart, the breaker state rebuilt from records is the same. | Deterministic |
@@ -812,6 +869,7 @@ after the first month:
 | Rulings take effect only after kwoon commits them to the policy repository's checkpoint branch on the host; the checkpoint push carries them off the host. | G8 is a floor: an operator decision that changes how the gate judges must be in git, reviewable, before it acts, not only in the host's store. A local commit keeps rulings off the network path. Cost: until the next checkpoint push succeeds, the only git copy of recent rulings is on the host, the same boundary G6 states. |
 | Event-store checkpoints go to a branch in the policy repository. | A second copy outside the host, in a repository the operator controls, on any forge or none. |
 | When several runs of one policy workflow land on one commit, any run's known failure makes the combined result `failed`; otherwise, an unknown run makes it `unknown`. | Fail closed: one green run must not mask a red one, and the result must not depend on which run finished last. Cost: a policy job that ends `skipped` or `neutral` under one of its workflow's triggers blocks every commit that trigger runs on, so the policy must name a job that runs to `success` under each trigger. |
+| The observed model comes from the harness's log only when kwoon has established at launch that the run cannot write that log; otherwise the launch record applies, and the log can only downgrade identity to `unknown`. Every turn's model is recorded, and a requirement holds only if every turn meets it. | A run's tools run as the same user as the harness, and a value the run can rewrite cannot establish identity. Recording every turn keeps a fallback from hiding behind the requested model. Cost: in the launch-record fallback, a run that rewrites the log can hide a fallback; the run record and the handoff state which evidence applied. |
 | No verdict carry-over in the MVP. | The floor (G10) holds trivially. Cost: a required sync also means a new review. Carry-over needs its own equivalence rule and tests. |
 
 Left to the plan, after comparing how mature projects of the same kind chose: the
@@ -847,7 +905,14 @@ None. Q1 (how G6 is stated) and Q2 (approving only at the host) were settled on
   manually, in each kind of governed repository, and under what conditions upstream CI
   runs on a fork's pull request at all.
 - How model, reasoning effort, and the compaction window can be set per run for each
-  supported local harness, and which of them the harness's log reports.
+  supported local harness, and which of them the harness's log reports. For the model,
+  also how each harness reports the serving model per turn and each fallback or
+  downgrade.
+- For each supported harness, whether kwoon's wrapper can keep the session-log location
+  unwritable to the run's tools while the harness still writes it, so that the
+  log-protection check can pass. The harness's inner sandbox is off inside the wrapper
+  (see "Runs"); without another confinement for the tools, the check fails and the
+  launch-record fallback applies.
 - Before implementing recovery for a missing acceptance run, verify with the configured
   credential that runs of the recorded workflow on the recorded target branch can be read
   completely across all pages, with stable run ids, triggering account, and trigger type.

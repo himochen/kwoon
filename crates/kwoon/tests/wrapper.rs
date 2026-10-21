@@ -336,6 +336,68 @@ fn a_forbidden_variable_fails_even_when_declared() {
     }
 }
 
+/// Every process on the host whose command line holds `needle`, with that command line.
+fn command_lines_holding(needle: &str) -> Vec<(u32, String)> {
+    let mut found = Vec::new();
+    for entry in fs::read_dir("/proc").unwrap().flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        if let Ok(cmdline) = fs::read(entry.path().join("cmdline")) {
+            let cmdline = String::from_utf8_lossy(&cmdline).replace('\0', " ");
+            if cmdline.contains(needle) {
+                found.push((pid, cmdline));
+            }
+        }
+    }
+    found
+}
+
+#[test]
+fn a_provider_credential_is_in_no_command_line() {
+    // Maintainer decision on #20: bubblewrap's arguments go through --args <fd>, so
+    // no process kwoon starts, bubblewrap or anything inside, carries the credential
+    // in its command line. The harness holds the run open while the test looks.
+    const KEY: &str = "canary-provider-key-41d7";
+    let fixture = Fixture::new();
+    let mut harness = fixture.harness("pause");
+    harness.provider_env = Some("FAKE_PROVIDER_KEY");
+    fixture.write_settings(&harness);
+    let mut kwoon = fixture
+        .command()
+        .env("FAKE_PROVIDER_KEY", KEY)
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let started = || {
+        fs::read_dir(&fixture.runs)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|run| run.path().join("home/started").exists())
+    };
+    wait_for("the harness to start", Duration::from_secs(20), started);
+    let harness_seen = !harness_processes(&fixture.bin).is_empty();
+    let bwrap = command_lines_holding(&fixture.bin.join("fake-harness").display().to_string());
+    let leaked = command_lines_holding(KEY);
+    for run in fs::read_dir(&fixture.runs).unwrap().flatten() {
+        fs::write(run.path().join("home/release"), "").unwrap();
+    }
+    let mut stdout = String::new();
+    std::io::Read::read_to_string(&mut kwoon.stdout.take().unwrap(), &mut stdout).unwrap();
+    let status = kwoon.wait().unwrap();
+    assert_eq!(leaked, Vec::new(), "the credential is in a command line");
+    // The controls: the scan saw the running harness and its bubblewrap, which got
+    // its options through --args, and the harness got the credential as a variable.
+    assert!(harness_seen);
+    assert!(
+        bwrap.iter().any(|(_, line)| line.contains("--args")),
+        "{bwrap:?}"
+    );
+    assert!(status.success(), "{stdout}");
+    assert!(!stdout.contains(KEY));
+}
+
 #[test]
 fn an_inherited_descriptor_does_not_reach_the_wrapper() {
     let fixture = Fixture::new();

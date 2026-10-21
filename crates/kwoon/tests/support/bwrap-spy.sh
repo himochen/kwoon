@@ -20,6 +20,30 @@
 set -u
 here=$(dirname "$0")
 log="$here/log"
+
+# kwoon passes bubblewrap's options through `--args <fd>`, NUL-separated, and the
+# command on argv. Rebuild the whole list as options then command, so that the modes
+# below see what bubblewrap would; the real bubblewrap then gets it on argv, which is
+# fine for this test-only stand-in.
+if [ "${1:-}" = --args ]; then
+    fd=$2
+    shift 2
+    options="$here/options.$$"
+    eval "/usr/bin/tr '\\0' '\\n' <&$fd" > "$options"
+    # Close it, as bubblewrap does once it has read it: nothing else may inherit it.
+    eval "exec $fd<&-"
+    count=$#
+    while IFS= read -r option; do set -- "$@" "$option"; done < "$options"
+    /usr/bin/rm -f "$options"
+    # Move the command, now first, behind the options.
+    i=0
+    while [ "$i" -lt "$count" ]; do
+        arg=$1
+        shift
+        set -- "$@" "$arg"
+        i=$((i + 1))
+    done
+fi
 {
     printf 'argv'
     for arg do printf ' [%s]' "$arg"; done

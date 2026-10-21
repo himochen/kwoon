@@ -50,6 +50,15 @@ enum Op {
     },
 }
 
+/// One start of bubblewrap: its options, which never go on its argv, and the command
+/// it runs.
+#[derive(Clone, Debug)]
+pub struct Invocation {
+    pub program: PathBuf,
+    pub options: Vec<OsString>,
+    pub command: Vec<OsString>,
+}
+
 /// A bubblewrap invocation under construction.
 #[derive(Clone, Debug)]
 pub struct Sandbox {
@@ -153,10 +162,12 @@ impl Sandbox {
         self
     }
 
-    /// The full argv: bubblewrap, its options, then `command`.
-    pub fn argv(&self, command: &[OsString]) -> Vec<OsString> {
-        let mut argv: Vec<OsString> = vec![self.bwrap.clone().into()];
-        let mut push = |items: &[&str]| argv.extend(items.iter().map(OsString::from));
+    /// How to start this sandbox around `command`. The options, which carry the
+    /// variables the harness needs and so its provider credential, are kept apart from
+    /// argv: [`crate::spawn::run`] hands them to bubblewrap through `--args <fd>`.
+    pub fn invocation(&self, command: &[OsString]) -> Invocation {
+        let mut options: Vec<OsString> = Vec::new();
+        let mut push = |items: &[&str]| options.extend(items.iter().map(OsString::from));
         // --unshare-all only tries the user and cgroup namespaces; the user and PID
         // namespaces are required, so they are named again.
         push(&["--unshare-all", "--unshare-user", "--unshare-pid"]);
@@ -165,31 +176,34 @@ impl Sandbox {
         }
         push(&["--die-with-parent", "--new-session", "--clearenv"]);
         for (key, value) in &self.env {
-            argv.extend(["--setenv".into(), key.into(), value.into()]);
+            options.extend(["--setenv".into(), key.into(), value.into()]);
         }
         for op in &self.ops {
             match op {
-                Op::Proc => argv.extend(["--proc".into(), "/proc".into()]),
-                Op::Dev => argv.extend(["--dev".into(), "/dev".into()]),
-                Op::Tmpfs(dest) => argv.extend(["--tmpfs".into(), dest.into()]),
+                Op::Proc => options.extend(["--proc".into(), "/proc".into()]),
+                Op::Dev => options.extend(["--dev".into(), "/dev".into()]),
+                Op::Tmpfs(dest) => options.extend(["--tmpfs".into(), dest.into()]),
                 Op::Bind {
                     source,
                     dest,
                     writable,
                 } => {
                     let flag = if *writable { "--bind" } else { "--ro-bind" };
-                    argv.extend([flag.into(), source.into(), dest.into()]);
+                    options.extend([flag.into(), source.into(), dest.into()]);
                 }
                 Op::Symlink { target, link } => {
-                    argv.extend(["--symlink".into(), target.into(), link.into()]);
+                    options.extend(["--symlink".into(), target.into(), link.into()]);
                 }
             }
         }
         if let Some(dir) = &self.chdir {
-            argv.extend(["--chdir".into(), dir.into()]);
+            options.extend(["--chdir".into(), dir.into()]);
         }
-        argv.extend(command.iter().cloned());
-        argv
+        Invocation {
+            program: self.bwrap.clone(),
+            options,
+            command: command.to_vec(),
+        }
     }
 
     /// The mounts this sandbox creates, for the probe's mount check.
@@ -271,26 +285,26 @@ mod tests {
 
     #[test]
     fn requires_user_and_pid_namespaces_and_clears_the_environment() {
-        let argv = strings(&Sandbox::new("/usr/bin/bwrap").argv(&["/probe".into()]));
+        let invocation = Sandbox::new("/usr/bin/bwrap").invocation(&["/probe".into()]);
+        assert_eq!(invocation.program, Path::new("/usr/bin/bwrap"));
+        assert_eq!(strings(&invocation.command), ["/probe"]);
         assert_eq!(
-            argv,
+            strings(&invocation.options),
             [
-                "/usr/bin/bwrap",
                 "--unshare-all",
                 "--unshare-user",
                 "--unshare-pid",
                 "--die-with-parent",
                 "--new-session",
                 "--clearenv",
-                "/probe"
             ]
         );
     }
 
     #[test]
     fn shares_the_network_only_when_asked() {
-        let argv = strings(&Sandbox::new("bwrap").share_net().argv(&[]));
-        assert!(argv.contains(&"--share-net".to_string()));
+        let options = strings(&Sandbox::new("bwrap").share_net().invocation(&[]).options);
+        assert!(options.contains(&"--share-net".to_string()));
     }
 
     #[test]

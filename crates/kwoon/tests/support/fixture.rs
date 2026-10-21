@@ -51,6 +51,9 @@ struct HarnessSettings {
     ro_binds: Vec<PathBuf>,
     timeout_seconds: u64,
     env: Vec<(String, String)>,
+    /// The provider credential from this variable of kwoon's environment, instead of
+    /// the default credential file.
+    provider_env: Option<&'static str>,
 }
 
 struct Run {
@@ -153,6 +156,7 @@ impl Fixture {
             ro_binds: vec![self.bin.clone()],
             timeout_seconds: 20,
             env: Vec::new(),
+            provider_env: None,
         }
     }
 
@@ -192,7 +196,7 @@ file = {credential}
 executable = {executable}
 ro_binds = [{binds}]
 timeout_seconds = {timeout}
-provider_credential = {{ file = {provider} }}
+provider_credential = {provider}
 
 [harness.claude-code.env]
 {env}
@@ -204,7 +208,10 @@ provider_credential = {{ file = {provider} }}
             executable = quote(&harness.executable),
             binds = binds.join(", "),
             timeout = harness.timeout_seconds,
-            provider = quote(&self.provider),
+            provider = match harness.provider_env {
+                Some(name) => format!("{{ env = {name:?} }}"),
+                None => format!("{{ file = {} }}", quote(&self.provider)),
+            },
             env = env.join("\n"),
         );
         fs::write(self.config.join("settings.toml"), text).unwrap();

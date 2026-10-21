@@ -210,7 +210,7 @@ fn check_in(host: &Host, harness: &Harness, run: &RunDir) -> Vec<Item> {
     }
     let command = harness.kind.command(&harness.executable, &run.home, PROMPT);
     let deadline = harness.timeout.min(STAGE_DEADLINE);
-    let stage3 = match spawn::run(&layout.argv(&command), deadline) {
+    let stage3 = match spawn::run(&layout.invocation(&command), deadline) {
         Ok(outcome) => outcome,
         Err(err) => {
             let why = format!("stage 3 (harness execution): cannot start bubblewrap: {err}");
@@ -469,7 +469,7 @@ fn run_probe(sandbox: &Sandbox, request: &Request, request_file: &Path) -> Resul
         "__probe".into(),
         PROBE_REQUEST_PATH.into(),
     ];
-    let outcome = spawn::run(&sandbox.argv(&command), STAGE_DEADLINE)
+    let outcome = spawn::run(&sandbox.invocation(&command), STAGE_DEADLINE)
         .map_err(|err| format!("cannot start bubblewrap: {err}"))?;
     expect_success(&outcome, STAGE_DEADLINE, Stderr::Trusted)?;
     serde_json::from_slice::<Report>(&outcome.stdout)

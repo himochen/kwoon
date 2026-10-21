@@ -1,18 +1,27 @@
 //! Starting a wrapper and keeping its process tree under control.
 //!
-//! The wrapper child gets exactly three descriptors: stdin from `/dev/null`, and pipes
-//! for stdout and stderr. Every other descriptor kwoon holds is close-on-exec from
-//! [`mark_descriptors_cloexec`]. The child leads its own process group; on its deadline
-//! the group is killed, and bubblewrap's `--die-with-parent` and PID namespace take the
-//! rest of the tree down with it.
+//! bubblewrap's options reach it through `--args <fd>`, NUL-separated on a pipe, and
+//! never through its argv, which any local user can read in `/proc/<pid>/cmdline`: the
+//! options carry the harness's provider credential (maintainer decision on #20, a
+//! wording fix to plan D5). So bubblewrap gets four descriptors: stdin from
+//! `/dev/null`, pipes for stdout and stderr, and the read end of the options pipe,
+//! which it reads before it starts the sandboxed process. That process gets exactly
+//! the first three; the probe's descriptor check shows it. Every other descriptor kwoon
+//! holds is close-on-exec from [`mark_descriptors_cloexec`]. The child leads its own
+//! process group; on its deadline the group is killed, and bubblewrap's
+//! `--die-with-parent` and PID namespace take the rest of the tree down with it.
 
-use std::ffi::OsString;
-use std::io::{self, Read};
+use std::fs::File;
+use std::io::{self, Read, Write};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
+
+use crate::builder::Invocation;
 
 /// Output beyond this many bytes per stream is read and dropped, so a run cannot
 /// exhaust kwoon's memory through its stdout.
@@ -60,23 +69,47 @@ pub struct Outcome {
     pub pipes_closed: bool,
 }
 
-/// Runs `argv` with its deadline.
-pub fn run(argv: &[OsString], deadline: Duration) -> io::Result<Outcome> {
-    let (program, args) = argv
-        .split_first()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "empty command"))?;
-    let mut child = Command::new(program)
-        .args(args)
+/// Starts bubblewrap as `invocation` says and waits for it, up to `deadline`.
+pub fn run(invocation: &Invocation, deadline: Duration) -> io::Result<Outcome> {
+    let (read, write) = pipe()?;
+    let fd = read.as_raw_fd();
+    let mut command = Command::new(&invocation.program);
+    command
+        .arg("--args")
+        .arg(fd.to_string())
+        .args(&invocation.command)
         .env_clear()
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .process_group(0)
-        .spawn()?;
+        .process_group(0);
+    // SAFETY: fcntl is async-signal-safe; it only clears close-on-exec on the read end,
+    // under its own number, so it replaces none of the child's other descriptors.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::fcntl(fd, libc::F_SETFD, 0) < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command.spawn()?;
+    drop(read);
+    // Written while bubblewrap reads, so options longer than the pipe's buffer do not
+    // block; a bubblewrap that exits early only makes the write fail.
+    let mut stream = Vec::new();
+    for option in &invocation.options {
+        stream.extend_from_slice(option.as_bytes());
+        stream.push(0);
+    }
+    let writer = thread::spawn(move || {
+        let _ = File::from(write).write_all(&stream);
+    });
     let stdout = drain(child.stdout.take().expect("stdout is piped"));
     let stderr = drain(child.stderr.take().expect("stderr is piped"));
 
     let ending = wait_until(&mut child, Instant::now() + deadline)?;
+    let _ = writer.join();
     let wait_for = |rx: mpsc::Receiver<Vec<u8>>| rx.recv_timeout(DRAIN_GRACE).ok();
     let (out, err) = (wait_for(stdout), wait_for(stderr));
     Ok(Outcome {
@@ -85,6 +118,17 @@ pub fn run(argv: &[OsString], deadline: Duration) -> io::Result<Outcome> {
         stdout: out.unwrap_or_default(),
         stderr: err.unwrap_or_default(),
     })
+}
+
+/// A pipe whose ends are both close-on-exec.
+fn pipe() -> io::Result<(OwnedFd, OwnedFd)> {
+    let mut fds = [0; 2];
+    // SAFETY: pipe2 fills both descriptors, which are owned below.
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: both descriptors were just created and are owned by nothing else.
+    Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
 }
 
 fn wait_until(child: &mut Child, deadline: Instant) -> io::Result<Ending> {

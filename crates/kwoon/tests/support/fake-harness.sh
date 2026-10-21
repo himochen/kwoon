@@ -66,6 +66,15 @@ log-fifo)
 log-hardlink)
     write_log && ln "$log" "$log_dir/second.jsonl"
     ;;
+pause)
+    # Holds the run until the test has looked at every process, then answers. The
+    # provider credential must have arrived as a variable.
+    test -n "${FAKE_PROVIDER_KEY:-}" || exit 3
+    : > "$HOME/started"
+    i=0
+    while [ ! -e "$HOME/release" ] && [ "$i" -lt 300 ]; do sleep 0.1; i=$((i + 1)); done
+    write_log
+    ;;
 hang)
     # A child that outlives the harness's deadline, holding the output pipe open. Both
     # processes keep this script's path in their command line, so the test can look for

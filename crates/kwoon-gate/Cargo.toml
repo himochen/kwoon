@@ -1,0 +1,8 @@
+[package]
+name = "kwoon-gate"
+description = "Records, canonical encoding, policy parsing, and the gate evaluator: the crate that judges."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true

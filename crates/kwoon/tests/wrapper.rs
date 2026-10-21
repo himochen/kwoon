@@ -710,6 +710,35 @@ fn a_symlinked_log_directory_is_refused_without_opening_its_target() {
 }
 
 #[test]
+fn a_run_home_swapped_for_a_link_on_the_host_is_refused() {
+    // Review R1, finding 7, through the doctor: after the harness exits, the spy (a host
+    // process) replaces the run home with a link to a directory holding a valid log.
+    // Following the link would read that log and verify the harness.
+    let fixture = Fixture::new();
+    let target = fixture.root.join("swap-target");
+    let log_dir = target.join(".claude/projects/elsewhere");
+    fs::create_dir_all(&log_dir).unwrap();
+    let log = log_dir.join("session.jsonl");
+    fs::write(
+        &log,
+        "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"x\"}]}}\n",
+    )
+    .unwrap();
+    fixture.spy(&format!("swap-home {}", target.display()));
+    let watch = OpenWatch::new(&[&target, &log_dir, &log]);
+    let run = fixture.doctor(&fixture.harness("ok"));
+    assert_eq!(
+        run.item("harness-starts-in-wrapper"),
+        "not provided: harness log refused: home: symbolic link"
+    );
+    assert_eq!(run.code, 1);
+    assert!(!watch.saw_any(), "the link target was opened");
+    // Removing the run directory removed the link, not what it points to.
+    assert!(log.exists());
+    assert_eq!(fixture.runs_left(), 0);
+}
+
+#[test]
 fn a_refused_log_name_is_not_printed() {
     // Review R1, finding 5: names under the run home are run output.
     assert_log_refused(

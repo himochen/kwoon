@@ -782,6 +782,7 @@ fn passing_report() -> serde_json::Value {
         "descriptors",
         "sockets",
         "environment",
+        "namespaces",
     ]
     .iter()
     .map(|name| serde_json::json!({"name": name, "ok": true, "detail": ""}))
@@ -793,6 +794,7 @@ fn passing_report() -> serde_json::Value {
         "reachable_tcp": [],
         "reachable_abstract": [],
         "reachable_errors": [],
+        "optional_namespaces_created": ["cgroup"],
     })
 }
 
@@ -803,6 +805,31 @@ fn doctor_with_report(report: &str) -> Run {
     fs::write(&file, report).unwrap();
     fixture.spy(&format!("report {}", file.display()));
     fixture.doctor(&fixture.harness("ok"))
+}
+
+#[test]
+fn the_optional_cgroup_namespace_is_reported_as_created() {
+    // Review R1, finding 8: plan D5 reports optional isolation as actually created.
+    let fixture = Fixture::new();
+    let run = fixture.doctor(&fixture.harness("ok"));
+    run.assert_verified();
+    assert_eq!(
+        run.item("wrapper-starts"),
+        "verified: optional cgroup namespace created"
+    );
+}
+
+#[test]
+fn an_optional_cgroup_namespace_not_created_is_reported() {
+    // The spy asks bubblewrap for the required namespaces only.
+    let fixture = Fixture::new();
+    fixture.spy("no-cgroup");
+    let run = fixture.doctor(&fixture.harness("ok"));
+    run.assert_verified();
+    assert_eq!(
+        run.item("wrapper-starts"),
+        "verified: optional cgroup namespace not created"
+    );
 }
 
 #[test]
@@ -1068,6 +1095,7 @@ fn the_probe_detects_each_exposure_in_a_leaky_sandbox() {
         "dbus_address": null,
         "run_clone": null,
         "run_home": null,
+        "host_namespaces": [],
     });
     // The fixture root is bound at its own path below, so the probe reads this file there.
     let request_file = fixture.root.join("request.json");

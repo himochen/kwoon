@@ -62,6 +62,8 @@ pub struct Request {
     /// holds the layout to plan D5 and not only to what the builder declared.
     pub run_clone: Option<PathBuf>,
     pub run_home: Option<PathBuf>,
+    /// The host's namespace identities, by name, to tell which ones the wrapper created.
+    pub host_namespaces: Vec<(String, u64)>,
 }
 
 /// Mounts that bubblewrap itself makes writable: its root and `/tmp` tmpfs, and its
@@ -90,14 +92,34 @@ pub struct Check {
 }
 
 /// The checks a full-layout report must hold, each exactly once.
-pub const REQUIRED_CHECKS: [&str; 6] = [
+pub const REQUIRED_CHECKS: [&str; 7] = [
     "files",
     "store-write",
     "mounts",
     "descriptors",
     "sockets",
     "environment",
+    "namespaces",
 ];
+
+/// The namespaces the wrapper must create (plan D5: `--unshare-all` plus the user and
+/// PID namespaces named again; the mount namespace is bubblewrap's own).
+pub const REQUIRED_NAMESPACES: [&str; 5] = ["user", "pid", "ipc", "uts", "mnt"];
+/// The namespace `--unshare-all` only tries to create.
+pub const OPTIONAL_NAMESPACES: [&str; 1] = ["cgroup"];
+
+/// The identity of each namespace this process is in, by name.
+pub fn namespace_identities() -> Result<Vec<(String, u64)>, String> {
+    REQUIRED_NAMESPACES
+        .iter()
+        .chain(&OPTIONAL_NAMESPACES)
+        .map(|name| {
+            fs::metadata(format!("/proc/self/ns/{name}"))
+                .map(|meta| (name.to_string(), meta.ino()))
+                .map_err(|err| format!("cannot read the {name} namespace: {err}"))
+        })
+        .collect()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Report {
@@ -109,6 +131,8 @@ pub struct Report {
     /// What the service scan could not observe. Non-empty means the lists above may be
     /// incomplete.
     pub reachable_errors: Vec<String>,
+    /// The optional namespaces the wrapper actually created.
+    pub optional_namespaces_created: Vec<String>,
 }
 
 impl Report {
@@ -141,6 +165,7 @@ pub fn run(request: &Request) -> Report {
         reachable_tcp: Vec::new(),
         reachable_abstract: Vec::new(),
         reachable_errors: Vec::new(),
+        optional_namespaces_created: Vec::new(),
     };
     if request.stage == Stage::Namespace {
         return report;
@@ -154,6 +179,9 @@ pub fn run(request: &Request) -> Report {
         check_sockets(request),
         check_environment(request, &variable_names()),
     ];
+    let (namespaces, created) = check_namespaces(request, namespace_identities());
+    report.checks.push(namespaces);
+    report.optional_namespaces_created = created;
     let tables = [
         (Path::new("/proc/net/tcp"), false),
         (Path::new("/proc/net/tcp6"), true),
@@ -543,6 +571,42 @@ fn connect_unix(target: &UnixTarget) -> Result<bool, String> {
     }
 }
 
+/// Namespaces: every required one differs from the host's. Returns the check and the
+/// optional namespaces that were created.
+fn check_namespaces(
+    request: &Request,
+    own: Result<Vec<(String, u64)>, String>,
+) -> (Check, Vec<String>) {
+    let own = match own {
+        Ok(own) => own,
+        Err(err) => return (check("namespaces", vec![err]), Vec::new()),
+    };
+    let created = |name: &str| -> Result<bool, String> {
+        let find = |list: &[(String, u64)]| list.iter().find(|(n, _)| n == name).map(|(_, id)| *id);
+        match (find(&own), find(&request.host_namespaces)) {
+            (Some(inside), Some(host)) => Ok(inside != host),
+            _ => Err(format!("no identity for the {name} namespace")),
+        }
+    };
+    let mut problems = Vec::new();
+    for name in REQUIRED_NAMESPACES {
+        match created(name) {
+            Ok(true) => {}
+            Ok(false) => problems.push(format!("the {name} namespace is the host's")),
+            Err(err) => problems.push(err),
+        }
+    }
+    let mut optional = Vec::new();
+    for name in OPTIONAL_NAMESPACES {
+        match created(name) {
+            Ok(true) => optional.push(name.to_string()),
+            Ok(false) => {}
+            Err(err) => problems.push(err),
+        }
+    }
+    (check("namespaces", problems), optional)
+}
+
 fn variable_names() -> BTreeSet<String> {
     std::env::vars_os()
         .map(|(k, _)| k.to_string_lossy().into_owned())
@@ -717,7 +781,36 @@ mod tests {
             dbus_address: None,
             run_clone: Some("/runs/1/clone".into()),
             run_home: Some("/runs/1/home".into()),
+            host_namespaces: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_required_namespace_shared_with_the_host_fails() {
+        let names = ["user", "pid", "ipc", "uts", "mnt", "cgroup"];
+        let host: Vec<(String, u64)> = names.iter().map(|n| (n.to_string(), 1)).collect();
+        let request = Request {
+            host_namespaces: host.clone(),
+            ..empty_request()
+        };
+        // All new: passes, and the optional cgroup namespace is reported created.
+        let all_new: Vec<(String, u64)> = names.iter().map(|n| (n.to_string(), 2)).collect();
+        let (check, created) = check_namespaces(&request, Ok(all_new.clone()));
+        assert!(check.ok, "{}", check.detail);
+        assert_eq!(created, ["cgroup"]);
+        // The IPC namespace is the host's: fails. The cgroup one too: reported absent.
+        let mut shared = all_new;
+        for entry in &mut shared {
+            if entry.0 == "ipc" || entry.0 == "cgroup" {
+                entry.1 = 1;
+            }
+        }
+        let (check, created) = check_namespaces(&request, Ok(shared));
+        assert_eq!(check.detail, "the ipc namespace is the host's");
+        assert!(created.is_empty());
+        // No evidence: fails.
+        let (check, _) = check_namespaces(&request, Err("unreadable".into()));
+        assert!(!check.ok);
     }
 
     fn mount(point: &str, read_only: bool) -> Mount {

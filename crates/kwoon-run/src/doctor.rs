@@ -139,6 +139,7 @@ fn check_in(host: &Host, harness: &Harness, run: &RunDir) -> Vec<Item> {
         dbus_address: None,
         run_clone: None,
         run_home: None,
+        host_namespaces: Vec::new(),
     };
     if let Err(why) =
         run_probe(&stage1, &request, &request_file).and_then(|report| expect_pid_namespace(&report))
@@ -176,6 +177,13 @@ fn check_in(host: &Host, harness: &Harness, run: &RunDir) -> Vec<Item> {
         dbus_address: host.dbus_address.clone(),
         run_clone: Some(run.clone.clone()),
         run_home: Some(run.home.clone()),
+        host_namespaces: match probe::namespace_identities() {
+            Ok(ids) => ids,
+            Err(err) => {
+                let why = format!("stage 2 (filesystem setup): {err}");
+                return finish(Stages::Failed(why), None, config_clean, None);
+            }
+        },
     };
     let report = match run_probe(&stage2, &request, &request_file)
         .and_then(|r| expect_pid_namespace(&r).map(|_| r))
@@ -262,7 +270,24 @@ fn finish(
     starts: Option<Item>,
 ) -> Vec<Item> {
     let wrapper_starts = match stages {
-        Stages::AllRan => item("wrapper-starts", Status::Verified, ""),
+        Stages::AllRan => {
+            // Optional isolation is reported as actually created (plan D5).
+            let created = |name: &str| {
+                report.is_some_and(|r| r.optional_namespaces_created.iter().any(|n| n == name))
+            };
+            let detail: Vec<String> = probe::OPTIONAL_NAMESPACES
+                .iter()
+                .map(|name| {
+                    let state = if created(name) {
+                        "created"
+                    } else {
+                        "not created"
+                    };
+                    format!("optional {name} namespace {state}")
+                })
+                .collect();
+            item("wrapper-starts", Status::Verified, detail.join("; "))
+        }
         Stages::Withheld(why) => item("wrapper-starts", Status::Unknown, why),
         Stages::Failed(why) => item("wrapper-starts", Status::NotProvided, why),
     };
